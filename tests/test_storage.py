@@ -9,7 +9,7 @@ import msgspec
 import pytest
 
 from sprite_compile.codec import MessageCodec
-from sprite_compile.storage import CacheTable, DatabaseHandle, Table, epoch_seconds
+from sprite_compile.storage import DatabaseHandle, ExpiringTable, Table, epoch_seconds, open_databases
 
 
 @dataclass
@@ -96,33 +96,51 @@ def test_rejects_table_names_that_are_not_identifiers(database: DatabaseHandle):
         Table(database, "rolls; DROP TABLE rolls", int, Roll)
 
 
-def test_cache_hides_expired_rows(database: DatabaseHandle):
-    cache = CacheTable(database, "webhooks", int, Roll)
-    cache.set(1, ROLL, expires_at=epoch_seconds() + 60)
-    cache.set(2, ROLL, expires_at=epoch_seconds() - 1)
+def test_row_that_doesnt_decode_reads_as_missing(database: DatabaseHandle, caplog: pytest.LogCaptureFixture):
+    rolls = Table(database, "rolls", int, Roll)
+    old_shape = msgspec.msgpack.encode({"type": "Roll", "label": "from before dice were stored"})
+    database.conn.execute("INSERT INTO rolls VALUES (?, ?)", (7, old_shape))
 
-    assert cache.get(1) == ROLL
-    assert cache.get(2) is None
-    assert list(cache) == [1]
-    assert len(cache) == 1
+    assert rolls.get(7) is None
+    assert "Row 7 of rolls doesn't decode" in caplog.text
 
 
-def test_cache_deletes_expired_rows_when_opened(database: DatabaseHandle):
-    CacheTable(database, "webhooks", int, Roll).set(1, ROLL, expires_at=epoch_seconds() - 1)
+def test_expiring_table_hides_expired_rows(database: DatabaseHandle):
+    table = ExpiringTable(database, "webhooks", int, Roll)
+    table.set(1, ROLL, expires_at=epoch_seconds() + 60)
+    table.set(2, ROLL, expires_at=epoch_seconds() - 1)
 
-    CacheTable(database, "webhooks", int, Roll)
+    assert table.get(1) == ROLL
+    assert table.get(2) is None
+    assert list(table) == [1]
+    assert len(table) == 1
+
+
+def test_expiring_table_deletes_expired_rows_when_opened(database: DatabaseHandle):
+    ExpiringTable(database, "webhooks", int, Roll).set(1, ROLL, expires_at=epoch_seconds() - 1)
+
+    ExpiringTable(database, "webhooks", int, Roll)
     (rows,) = database.conn.execute("SELECT COUNT(*) FROM webhooks").fetchone()
     assert rows == 0
 
 
-def test_cache_set_refreshes_expiry(database: DatabaseHandle):
-    cache = CacheTable(database, "webhooks", int, Roll)
-    cache.set(1, ROLL, expires_at=epoch_seconds() - 1)
-    cache.set(1, ROLL, expires_at=epoch_seconds() + 60)
+def test_expiring_set_refreshes_expiry(database: DatabaseHandle):
+    table = ExpiringTable(database, "webhooks", int, Roll)
+    table.set(1, ROLL, expires_at=epoch_seconds() - 1)
+    table.set(1, ROLL, expires_at=epoch_seconds() + 60)
 
-    assert cache.get(1) == ROLL
+    assert table.get(1) == ROLL
 
 
-def test_cache_rows_need_an_expiry(database: DatabaseHandle):
+def test_expiring_rows_need_an_expiry(database: DatabaseHandle):
     with pytest.raises(TypeError):
-        CacheTable(database, "webhooks", int, Roll)[1] = ROLL
+        ExpiringTable(database, "webhooks", int, Roll)[1] = ROLL
+
+
+def test_state_and_cache_databases_share_the_deployed_data_dir(
+    tmp_path: Path, codec: MessageCodec, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("SPRITE_DATA_DIR", str(tmp_path))
+    databases = open_databases("chance-sprite", codec)
+    databases.close()
+    assert sorted(path.name for path in tmp_path.glob("*.sqlite3")) == ["cache.sqlite3", "state.sqlite3"]

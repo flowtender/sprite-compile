@@ -34,10 +34,11 @@ several frontends sharing one database. `discord.py` becomes an optional extra o
   bots that don't fit the base class. Shared settings (`guild_id`, `global_commands`, `username`) come from
   `DiscordSettings`, embedded as `[discord]`; bots add `DISCORD_SECRETS` (the `discord_token`) to their `SECRETS`.
   `UserAvatarCache` (`sprite_compile.discord.avatars`) keeps users' names and avatars per guild.
-- Storage: SQLite only, in the instance's `data/`: a state database (typed tables, int or str keys) and a separate
-  cache database (rows with `expires_at`), which is always safe to delete. No JSON state files. The base image sets
-  `SPRITE_DATA_DIR` to the data mount; without it (development) the databases go to the platformdirs state and cache
-  dirs.
+- Storage: SQLite only, in the instance's `data/` (`open_databases`): `state.sqlite3` (typed tables, int or str
+  keys) and `cache.sqlite3`, which is always safe to delete. `ExpiringTable`s (rows with `expires_at`, purged on open
+  and by `purge_expired()`) work in either. A row that doesn't decode is logged and reads as missing. No JSON state
+  files. The base image sets `SPRITE_DATA_DIR` to the data mount; without it (development) the databases go to the
+  platformdirs state and cache dirs.
 - Codec (`sprite_compile.codec`): registered dataclasses ↔ tagged plain data for msgpack; enums by member name;
   msgspec-native values (datetime, timedelta, UUID, sets, …) rebuilt from field type hints. Bots build the registry
   with `build_registry(packages)`, which runs `check_hints()` and fails on field types the codec can't round-trip; a

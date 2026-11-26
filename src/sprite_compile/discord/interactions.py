@@ -15,7 +15,7 @@ from typing import Any, Protocol, TypeGuard, runtime_checkable
 import discord
 
 from ..codec import library_type
-from ..storage import CacheTable, DatabaseHandle, epoch_seconds
+from ..storage import DatabaseHandle, ExpiringTable, epoch_seconds
 
 log = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ class WebhookHandles:
     TABLE = "webhook_handles"
 
     def __init__(self, database: DatabaseHandle) -> None:
-        self.table = CacheTable(database, self.TABLE, int, WebhookHandle)
+        self.table = ExpiringTable(database, self.TABLE, int, WebhookHandle)
 
     def remember(self, handle: WebhookHandle) -> None:
         self.table.set(handle.message_id, handle, expires_at=handle.expires_at)
