@@ -22,7 +22,12 @@ it for long-term service).
 - `SpriteBot(commands.Bot)`: loads extensions/cogs, guild and/or global command registration, application emoji sync
   from package assets, username sync.
 - `run(BotClass, ConfigModel, SECRETS)`: logging, config load and validation, secrets, readiness notification, start.
-- Storage: atomic JSON state files, TTL cache files, SQLite tables.
+- Storage: SQLite only, in the instance's `data/`: a state database (typed tables, int or str keys) and a separate
+  cache database (rows with `expires_at`), which is always safe to delete. No JSON state files.
+- Codec (`sprite_compile.codec`): registered dataclasses ↔ tagged plain data for msgpack; enums by member name;
+  msgspec-native values (datetime, timedelta, UUID, sets, …) rebuilt from field type hints. Bots build the registry
+  with `build_registry(packages)`, which runs `check_hints()` and fails on field types the codec can't round-trip; a
+  bot's test suite should build its full registry once.
 - `sprite config sync` / `sprite config check`, `sprite secrets list` (see below).
 - UX primitives (penciled in, components v2: `LayoutView`, `Container`, `ui.Label`):
   - Persistent buttons as `DynamicItem`s with regex `custom_id` templates carrying their state, so they survive
