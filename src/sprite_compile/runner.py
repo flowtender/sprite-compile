@@ -1,15 +1,19 @@
 """`run()`: a sprite's command. Without arguments it starts the bot; `config sync|check` and `secrets list` manage the
 instance. A bot's `__main__`:
 
+    def make_frontends(config: ChanceConfig, secrets: dict[str, str]) -> list[Frontend]:
+        return [ChanceSprite(config.discord, token=secrets["discord_token"], intents=...)]
+
     def main() -> int:
-        return run("chance-sprite", ChanceConfig, SECRETS, make_bot)
+        return run("chance-sprite", ChanceConfig, SECRETS, make_frontends)
 
 `app_name` is the bot's distribution name: its installed version is what config sync writes next to new keys, and it
-names the platformdirs folders in development.
+names the platformdirs folders in development. The runner knows no chat platform; each frontend (Discord, …) is one
+way to reach the bot, and several can run in one process, sharing whatever `make_frontends` gives them.
 
-Start order: logging, config, secrets, the bot (`make_bot`), its extensions, then READY, then the Discord login. A
-release that can't get that far is rolled back by auto-update; failures after READY (Discord unreachable, an expired
-token) are treated as transient and left to systemd's restarts.
+Start order: logging, config, secrets, `make_frontends`, every frontend's `prepare()`, READY, then every frontend's
+`serve()`. A release that can't get to READY is rolled back by auto-update. A frontend whose `serve()` fails after
+that (its platform down, an expired token) is retried on its own with a growing delay while the others keep running.
 """
 
 from __future__ import annotations
@@ -20,18 +24,30 @@ import importlib.metadata
 import logging
 import os
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
+from typing import Protocol
 
 from .config import ConfigError, ConfigSection, load_config
 from .config_sync import run_config_command
-from .discord_sprite import DiscordSprite
 from .paths import config_path, secrets_dir
 from .secrets import MissingSecretsError, Secret, load_secrets, run_secrets_command
 from .systemd import notify_ready, under_systemd
 
 log = logging.getLogger(__name__)
 
-TOKEN_SECRET = "discord_token"
+RETRY_FIRST_DELAY = 5.0
+RETRY_MAX_DELAY = 600.0
+# A frontend that served this long before failing was healthy: its retries start over at the first delay.
+HEALTHY_AFTER = 600.0
+
+
+class Frontend(Protocol):
+    async def prepare(self) -> None:
+        """Everything that fails only because the release is broken (e.g. loading extensions); runs before READY."""
+
+    async def serve(self) -> None:
+        """Connect and run until stopped; may be called again after it raised."""
 
 
 def configure_logging() -> None:
@@ -53,23 +69,44 @@ def parse_arguments(app_name: str, argv: Sequence[str] | None) -> argparse.Names
     return parser.parse_args(argv)
 
 
-async def start(bot: DiscordSprite, token: str) -> None:
-    async with bot:
-        await bot.load_extensions()
-        notify_ready()
-        await bot.start(token)
+async def keep_serving(frontend: Frontend) -> None:
+    """Serve until `serve()` returns; retry failures with a delay that doubles up to RETRY_MAX_DELAY."""
+    name = type(frontend).__name__
+    delay = RETRY_FIRST_DELAY
+    while True:
+        started = time.monotonic()
+        try:
+            await frontend.serve()
+            log.info("%s stopped", name)
+            return
+        except Exception:
+            if time.monotonic() - started >= HEALTHY_AFTER:
+                delay = RETRY_FIRST_DELAY
+            log.exception("%s failed; retrying in %.0f s", name, delay)
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, RETRY_MAX_DELAY)
+
+
+async def start[C: ConfigSection](
+    make_frontends: Callable[[C, dict[str, str]], Sequence[Frontend]], config: C, secrets: dict[str, str]
+) -> None:
+    frontends = make_frontends(config, secrets)
+    if not frontends:
+        raise ValueError("make_frontends returned no frontends")
+    for frontend in frontends:
+        await frontend.prepare()
+    notify_ready()
+    await asyncio.gather(*(keep_serving(frontend) for frontend in frontends))
 
 
 def run[C: ConfigSection](
     app_name: str,
     config_type: type[C],
     secrets: Mapping[str, Secret],
-    make_bot: Callable[[C, dict[str, str]], DiscordSprite],
+    make_frontends: Callable[[C, dict[str, str]], Sequence[Frontend]],
     argv: Sequence[str] | None = None,
 ) -> int:
     """Run the command line in `argv` (default `sys.argv[1:]`); returns the exit status."""
-    if TOKEN_SECRET not in secrets or not secrets[TOKEN_SECRET].required:
-        raise ValueError(f"{app_name} must declare the required secret {TOKEN_SECRET!r}")
     arguments = parse_arguments(app_name, argv)
     configure_logging()
 
@@ -85,6 +122,5 @@ def run[C: ConfigSection](
     except (ConfigError, MissingSecretsError) as error:
         print(error, file=sys.stderr)
         return 1
-    bot = make_bot(config, secret_values)
-    asyncio.run(start(bot, secret_values[TOKEN_SECRET]))
+    asyncio.run(start(make_frontends, config, secret_values))
     return 0

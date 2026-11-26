@@ -10,7 +10,7 @@ import discord
 import pytest
 from PIL import Image
 
-from sprite_compile.emojis import sync_application_emojis
+from sprite_compile.discord.emojis import sync_application_emojis
 
 
 @dataclass

@@ -9,7 +9,7 @@ import msgspec
 import pytest
 
 from sprite_compile.codec import MessageCodec
-from sprite_compile.storage import CacheTable, DatabaseHandle, Table, UserAvatarStore, epoch_seconds
+from sprite_compile.storage import CacheTable, DatabaseHandle, Table, epoch_seconds
 
 
 @dataclass
@@ -126,21 +126,3 @@ def test_cache_set_refreshes_expiry(database: DatabaseHandle):
 def test_cache_rows_need_an_expiry(database: DatabaseHandle):
     with pytest.raises(TypeError):
         CacheTable(database, "webhooks", int, Roll)[1] = ROLL
-
-
-def test_avatar_falls_back_to_global_row(database: DatabaseHandle):
-    avatars = UserAvatarStore(database)
-    avatars.update_avatar(5, 0, "Elle", "https://cdn/global.png")
-    avatars.update_avatar(5, 99, "Elle (guild)", "https://cdn/guild.png")
-
-    assert avatars.get_avatar(5, 99) == ("Elle (guild)", "https://cdn/guild.png")
-    assert avatars.get_avatar(5, 12) == ("Elle", "https://cdn/global.png")
-    assert avatars.get_avatar(6, 99) is None
-
-
-def test_avatar_update_overwrites(database: DatabaseHandle):
-    avatars = UserAvatarStore(database)
-    avatars.update_avatar(5, 99, "old", "https://cdn/old.png")
-    avatars.update_avatar(5, 99, "new", "https://cdn/new.png")
-
-    assert avatars.get_avatar(5, 99) == ("new", "https://cdn/new.png")

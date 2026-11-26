@@ -5,9 +5,10 @@ from unittest.mock import AsyncMock
 
 import discord
 import pytest
+from discord.ext import commands
 
 from sprite_compile.config import check_settings, load_config
-from sprite_compile.discord_sprite import DiscordSettings, DiscordSprite, sync_username
+from sprite_compile.discord.sprite import DiscordSettings, DiscordSprite, sync_username
 
 APPLICATION_ID = 1000
 GUILD_ID = 2000
@@ -17,8 +18,10 @@ class PingSprite(DiscordSprite):
     extension_names = ("discord_fixtures.ping",)
 
 
-def make_bot(**settings) -> PingSprite:
-    bot = PingSprite(DiscordSettings(**settings), intents=discord.Intents.none(), application_id=APPLICATION_ID)
+def make_bot(bot_type: type[DiscordSprite] = PingSprite, **settings) -> DiscordSprite:
+    bot = bot_type(
+        DiscordSettings(**settings), token="abc.def", intents=discord.Intents.none(), application_id=APPLICATION_ID
+    )
     bot.http.bulk_upsert_global_commands = AsyncMock(return_value=[])
     bot.http.bulk_upsert_guild_commands = AsyncMock(return_value=[])
     return bot
@@ -26,7 +29,7 @@ def make_bot(**settings) -> PingSprite:
 
 async def start(bot: DiscordSprite) -> None:
     """What `run()` and discord.py do before the bot is ready, minus the Discord login."""
-    await bot.load_extensions()
+    await bot.prepare()
     await bot.setup_hook()
 
 
@@ -60,8 +63,7 @@ class EmojiPingSprite(PingSprite):
 
 
 async def test_package_emojis_are_synced():
-    bot = EmojiPingSprite(DiscordSettings(), intents=discord.Intents.none(), application_id=APPLICATION_ID)
-    bot.http.bulk_upsert_global_commands = AsyncMock(return_value=[])
+    bot = make_bot(EmojiPingSprite)
     dice = discord.PartialEmoji(name="dice", id=7)
     bot.fetch_application_emojis = AsyncMock(side_effect=[[], [dice]])
     bot.create_application_emoji = AsyncMock(return_value=dice)
@@ -72,6 +74,32 @@ async def test_package_emojis_are_synced():
     bot.create_application_emoji.assert_awaited_once()
     assert bot.create_application_emoji.await_args.kwargs["name"] == "dice"
     assert bot.app_emojis.get("dice", "🎲") == "<:dice:7>"
+
+
+class BrokenSprite(DiscordSprite):
+    extension_names = ("discord_fixtures.broken",)
+
+
+async def test_broken_extension_fails_prepare():
+    with pytest.raises(commands.ExtensionFailed, match="Duplicate command"):
+        await make_bot(BrokenSprite).prepare()
+
+
+async def test_serve_reopens_the_client_for_the_next_attempt():
+    bot = make_bot()
+    closed_at_login = []
+
+    async def static_login(token: str) -> None:
+        closed_at_login.append(bot.is_closed())
+        raise discord.LoginFailure("Improper token has been passed.")
+
+    bot.http.static_login = static_login
+
+    for _ in range(2):
+        with pytest.raises(discord.LoginFailure):
+            await bot.serve()
+    assert closed_at_login == [False, False]
+    assert bot.is_closed()
 
 
 async def test_guild_only_removes_previous_global_commands():

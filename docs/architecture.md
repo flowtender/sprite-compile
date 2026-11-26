@@ -19,13 +19,21 @@ it for long-term service).
 ## sprite-compile
 
 ### Library
-- `DiscordSprite(commands.Bot)`: loads the extensions it lists in `extension_names`, guild and/or global command
-  registration, application emoji sync from package assets (read lazily, with per-name fallbacks), username sync. Its
-  steps are also plain functions, for bots that don't fit the base class. Shared settings (`guild_id`,
-  `global_commands`, `username`) come from `DiscordSettings`, embedded as `[discord]`.
-- `run(app_name, ConfigModel, SECRETS, make_bot)`: the bot's whole command line. Logging (`$LOG_LEVEL`; no timestamps
-  under systemd), config, secrets (the token is the `discord_token` secret), `make_bot(config, secrets)`, extensions,
-  READY, then the Discord login; `config sync|check` and `secrets list` as subcommands.
+The core (config, secrets, storage, codec, `run()`) knows nothing about Discord. Discord support lives in
+`sprite_compile.discord`; other chat platforms (Telegram, Slack, …) would be sibling frontends. One process can run
+several frontends sharing one database. `discord.py` becomes an optional extra once a second frontend exists.
+
+- `run(app_name, ConfigModel, SECRETS, make_frontends)`: the bot's whole command line. Logging (`$LOG_LEVEL`; no
+  timestamps under systemd), config, secrets, `make_frontends(config, secrets)`, every frontend's `prepare()`, READY,
+  then every frontend's `serve()`; `config sync|check` and `secrets list` as subcommands. A frontend whose `serve()`
+  fails is retried on its own (5 s, doubling up to 10 min; back to 5 s after it ran 10 min) while the others keep
+  running.
+- `sprite_compile.discord.sprite.DiscordSprite(commands.Bot)`, the Discord frontend: `prepare()` loads the extensions
+  it lists in `extension_names`; `serve()` logs in. Guild and/or global command registration, application emoji sync
+  from package assets (read lazily, with per-name fallbacks), username sync. Its steps are also plain functions, for
+  bots that don't fit the base class. Shared settings (`guild_id`, `global_commands`, `username`) come from
+  `DiscordSettings`, embedded as `[discord]`; bots add `DISCORD_SECRETS` (the `discord_token`) to their `SECRETS`.
+  `UserAvatarCache` (`sprite_compile.discord.avatars`) keeps users' names and avatars per guild.
 - Storage: SQLite only, in the instance's `data/`: a state database (typed tables, int or str keys) and a separate
   cache database (rows with `expires_at`), which is always safe to delete. No JSON state files. The base image sets
   `SPRITE_DATA_DIR` to the data mount; without it (development) the databases go to the platformdirs state and cache
@@ -188,14 +196,15 @@ flowchart LR
   before connecting to Discord. An image that crashes on startup, fails validation, lacks a required secret or has a
   broken extension fails the start (at the latest at `TimeoutStartSec`) and is rolled back. With the default
   (`conmon` notify) the unit counts as started as soon as the container runs, so none of that would roll back.
-- Failures after READY are treated as transient, not as a bad release: Discord being slow or down, an expired token,
-  rate limits. The process exits and systemd restarts it with a growing delay (`Restart=on-failure`, `RestartSec=`,
-  `RestartSteps=`, `RestartMaxDelaySec=`; systemd ≥ 254), so it keeps retrying slowly instead of hitting the start
-  limit and staying failed. Gateway drops while running never reach systemd: discord.py reconnects by itself.
+- Failures after READY are treated as transient, not as a bad release: the platform being slow or down, an expired
+  token, rate limits. `run()` retries the failed frontend in-process with a growing delay while the bot's other
+  frontends keep running; gateway drops never even reach it, since discord.py reconnects by itself. systemd's
+  restart, with its own growing delay (`Restart=on-failure`, `RestartSec=`, `RestartSteps=`, `RestartMaxDelaySec=`;
+  systemd ≥ 254), only covers crashes outside the frontends, so it doesn't hit the start limit and stay failed.
 - The config sync/check `ExecStartPre=` runs the new image, so a release whose config fails validation fails the
   start and rolls back too [inferred from systemd semantics; verify].
-- Not covered: a release bug that only shows after READY (e.g. a command payload Discord rejects). It crash-loops
-  with the restart delay and is fixed by pushing a new release.
+- Not covered: a release bug that only shows after READY (e.g. a command payload Discord rejects). Its frontend keeps
+  retrying with the delay and is fixed by pushing a new release.
 - Private images: root's registry login, `sudo podman login <registry>`, ends up in `/run/containers/0/auth.json`,
   which is cleared on reboot. Point auto-update at a persistent file instead (`io.containers.autoupdate.authfile` label
   or `REGISTRY_AUTH_FILE`).

@@ -1,18 +1,22 @@
-"""`DiscordSprite`, a `commands.Bot` that loads its extensions, syncs its application emojis, registers its slash
-commands and keeps its username.
+"""`DiscordSprite`, the Discord frontend: a `commands.Bot` that loads its extensions, syncs its application emojis,
+registers its slash commands and keeps its username.
 
 The steps are plain functions too (`sync_application_emojis`, `sync_commands`, `sync_username`), so a bot that doesn't
-fit the base class can call them itself. A bot embeds `DiscordSettings` in its config as the `[discord]` table and
-lists its extensions and the package holding its emoji images:
+fit the base class can call them itself. A bot embeds `DiscordSettings` in its config as the `[discord]` table, adds
+`DISCORD_SECRETS` to its own secrets, and lists its extensions and the package holding its emoji images:
+
+    SECRETS = {**DISCORD_SECRETS, "gmail_oauth": Secret("OAuth client JSON", required=False)}
 
     class ChanceSprite(DiscordSprite):
         extension_names = ("chance_sprite.command_loader",)
         emoji_package = "chance_sprite.emojis"
 
-`run()` loads the extensions before logging in, so a broken extension fails the start before READY and the release is
-rolled back. Emojis are synced after login, so extensions read `self.app_emojis` when they render, not when they load;
-until the sync, every lookup gets its fallback. Extensions add their commands to the global tree; `sync_commands`
-copies them to the guild when one is configured.
+    ChanceSprite(config.discord, token=secrets["discord_token"], intents=discord.Intents.default())
+
+`prepare()` loads the extensions before READY, so a broken extension fails the start and the release is rolled back.
+Emojis are synced after login, so extensions read `self.app_emojis` when they render, not when they load; until the
+sync, every lookup gets its fallback. Extensions add their commands to the global tree; `sync_commands` copies them to
+the guild when one is configured.
 """
 
 from __future__ import annotations
@@ -25,12 +29,15 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from .config import ConfigSection, Setting
+from ..config import ConfigSection, Setting
+from ..secrets import Secret
 from .emojis import AppEmojis, sync_application_emojis
 
 log = logging.getLogger(__name__)
 
 ADDED = "sprite-compile 0.1.0"
+
+DISCORD_SECRETS = {"discord_token": Secret("Bot token from the Discord Developer Portal")}
 
 
 class DiscordSettings(ConfigSection):
@@ -80,15 +87,25 @@ class DiscordSprite(commands.Bot):
     extension_names: tuple[str, ...] = ()
     emoji_package: str | None = None
 
-    def __init__(self, settings: DiscordSettings, *, intents: discord.Intents, **options: Any) -> None:
+    def __init__(self, settings: DiscordSettings, *, token: str, intents: discord.Intents, **options: Any) -> None:
         options.setdefault("command_prefix", commands.when_mentioned)  # slash commands only; prefix is never used
         super().__init__(intents=intents, **options)
         self.discord_settings = settings
+        self.token = token
         self.app_emojis = AppEmojis()
 
-    async def load_extensions(self) -> None:
+    async def prepare(self) -> None:
         for name in self.extension_names:
             await self.load_extension(name)
+
+    async def serve(self) -> None:
+        """Log in and stay connected. Closes the client when it fails, and reopens it for the next attempt."""
+        if self.is_closed():
+            self.clear()
+        try:
+            await self.start(self.token)
+        finally:
+            await self.close()
 
     async def setup_hook(self) -> None:
         if self.emoji_package is not None:
