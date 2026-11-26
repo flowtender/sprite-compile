@@ -19,8 +19,9 @@ it for long-term service).
 ## sprite-compile
 
 ### Library
-- `SpriteBot(commands.Bot)`: loads extensions/cogs, guild and/or global command registration, application emoji sync
-  from package assets, username sync.
+- `DiscordSprite(commands.Bot)`: loads extensions/cogs, guild and/or global command registration, application emoji
+  sync from package assets, username sync. Its steps are also plain functions, for bots that don't fit the base class.
+  Shared settings (`guild_id`, `global_commands`, `username`) come from `DiscordSettings`, embedded as `[discord]`.
 - `run(BotClass, ConfigModel, SECRETS)`: logging, config load and validation, secrets, readiness notification, start.
 - Storage: SQLite only, in the instance's `data/`: a state database (typed tables, int or str keys) and a separate
   cache database (rows with `expires_at`), which is always safe to delete. No JSON state files. The base image sets
