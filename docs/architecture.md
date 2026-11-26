@@ -30,7 +30,8 @@ it for long-term service).
   msgspec-native values (datetime, timedelta, UUID, sets, …) rebuilt from field type hints. Bots build the registry
   with `build_registry(packages)`, which runs `check_hints()` and fails on field types the codec can't round-trip; a
   bot's test suite should build its full registry once.
-- `sprite config sync` / `sprite config check`, `sprite secrets list` (see below).
+- `config sync` / `config check` and `secrets list` as subcommands of each bot's own command (`run()` dispatches
+  them; see below).
 - UX primitives (penciled in, components v2: `LayoutView`, `Container`, `ui.Label`):
   - Persistent buttons as `DynamicItem`s with regex `custom_id` templates carrying their state, so they survive
     restarts without a database record.
@@ -79,15 +80,23 @@ itself: `pyproject.toml`, Containerfile (`FROM sprite-compile:X.Y`), CI workflow
 - Strict validation at startup: unknown keys and missing required keys are errors naming the key.
 - The base image sets `SPRITE_CONFIG` to the mounted file; without it (development) it is `config.toml` in the
   platformdirs config dir. A missing file counts as empty.
-- `sprite config sync` (tomlkit, preserves comments and formatting) adds every missing key **commented out**, with its
-  description, its default and the version that added it, so the code default keeps applying until uncommented:
+- Every field declares its description and the bot version that added it; `check_settings()` fails on fields
+  without one (a bot's test suite runs it):
+  ```python
+  max_playlist_items: Annotated[int, Setting("Maximum entries taken from one playlist link.", added="0.4.0")] = 100
+  ```
+- `<bot> config sync` (tomlkit, preserves comments and formatting) adds every missing key **commented out**, with
+  its description, its default and the version that added it, so the code default keeps applying until uncommented:
   ```toml
   # Maximum entries taken from one playlist link. (added in 0.4.0)
   # max_playlist_items = 100
   ```
-  Keys the code no longer knows are flagged / commented out with a `# removed in …` note.
+  Keys already present as comments count as present. Keys the code no longer knows are commented out with a
+  `# removed in <bot version>:` note (left in, they would fail validation).
+- `<bot> config check` writes nothing; it fails on validation errors and when the file is out of sync.
 - Sync runs automatically before every start (`ExecStartPre=`), non-interactive, as a one-shot container with the
-  config writable. The bot's own container mounts the config read-only.
+  config's directory writable (sync replaces the file atomically). The bot's own container mounts the config
+  read-only.
 
 ## Secrets
 
