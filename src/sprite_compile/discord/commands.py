@@ -7,12 +7,14 @@ A command is a plain function whose parameters carry their Discord description (
     def roll_dice(
         *,
         dice: Annotated[Range[int, 1, 99], Desc("Number of dice.")],
-        label: Annotated[str, Desc("A label to describe the roll.")] = "",
+        gremlins: Annotated[Range[int, 0, 4], Desc("Fewer 1s needed to glitch.")] = 0,
     ) -> DiceRoll: ...
 
 The library never calls the function itself: each command hands `(interaction, function, arguments)` to the bot's
 `invoke`, which runs it and answers. `build_command_group` collects the commands of a package (subgroups named after
-the modules under it) and/or an explicit list into one top-level group.
+the modules under it) and/or an explicit list into one top-level group. Its `leading_options` are required options in
+front of every command's own, which the functions don't declare: `invoke` gets them with the rest of the arguments and
+takes them out before calling the function (e.g. chance's roll label).
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from __future__ import annotations
 import inspect
 import logging
 import sys
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from types import ModuleType
 from typing import Annotated, Any, get_args, get_origin, get_type_hints
@@ -90,28 +92,36 @@ def find_metadata[T](metadata: tuple[Any, ...], kind: type[T]) -> T | None:
     return next((item for item in metadata if isinstance(item, kind)), None)
 
 
-def build_callback(fn: CommandFunc, invoke: Invoke) -> Callable[..., Awaitable[None]]:
-    """A discord.py callback taking `fn`'s parameters, with `Annotated` stripped (discord.py would read the metadata as
-    a transformer) and the `Desc` and `Choices` applied."""
+def build_callback(
+    fn: CommandFunc, invoke: Invoke, leading_options: Mapping[str, Any] = {}
+) -> Callable[..., Awaitable[None]]:
+    """A discord.py callback taking the `leading_options` (required, annotated like parameters) and then `fn`'s
+    parameters, with `Annotated` stripped (discord.py would read the metadata as a transformer) and the `Desc` and
+    `Choices` applied."""
     hints = get_type_hints(fn, include_extras=True)
+    own_parameters = inspect.signature(fn).parameters.values()
+    if clashes := leading_options.keys() & {parameter.name for parameter in own_parameters}:
+        raise TypeError(f"{qualified_name(fn)}: parameters {sorted(clashes)} clash with the group's leading options")
+    options = [(name, annotation, inspect.Parameter.empty) for name, annotation in leading_options.items()] + [
+        (parameter.name, hints.get(parameter.name, parameter.annotation), parameter.default)
+        for parameter in own_parameters
+    ]
     parameters = [
         inspect.Parameter("interaction", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=discord.Interaction)
     ]
     descriptions: dict[str, str] = {}
     choices: dict[str, list[app_commands.Choice[Any]]] = {}
 
-    for parameter in inspect.signature(fn).parameters.values():
-        annotation, metadata = split_annotated(hints.get(parameter.name, parameter.annotation))
+    for name, full_annotation, default in options:
+        annotation, metadata = split_annotated(full_annotation)
         desc = find_metadata(metadata, Desc)
         if desc is None:
-            raise TypeError(f"{qualified_name(fn)}: parameter {parameter.name!r} has no Desc(...)")
-        descriptions[parameter.name] = desc.text
+            raise TypeError(f"{qualified_name(fn)}: parameter {name!r} has no Desc(...)")
+        descriptions[name] = desc.text
         if parameter_choices := find_metadata(metadata, Choices):
-            choices[parameter.name] = list(parameter_choices.values)
+            choices[name] = list(parameter_choices.values)
         parameters.append(
-            inspect.Parameter(
-                parameter.name, inspect.Parameter.KEYWORD_ONLY, default=parameter.default, annotation=annotation
-            )
+            inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, default=default, annotation=annotation)
         )
 
     async def callback(interaction: discord.Interaction, **arguments: Any) -> None:
@@ -125,7 +135,9 @@ def build_callback(fn: CommandFunc, invoke: Invoke) -> Callable[..., Awaitable[N
     return app_commands.choices(**choices)(described) if choices else described
 
 
-def build_command(fn: CommandFunc, invoke: Invoke, *, strip_prefix: str = "") -> app_commands.Command[Any, ..., Any]:
+def build_command(
+    fn: CommandFunc, invoke: Invoke, *, strip_prefix: str = "", leading_options: Mapping[str, Any] = {}
+) -> app_commands.Command[Any, ..., Any]:
     """The command for `fn`: named by its `@command(name=)` or its function name minus `strip_prefix`, described by its
     `@command(desc=)` or the first line of its docstring."""
     meta = command_meta(fn)
@@ -135,7 +147,7 @@ def build_command(fn: CommandFunc, invoke: Invoke, *, strip_prefix: str = "") ->
     return app_commands.Command(
         name=meta.name or fn.__name__.removeprefix(strip_prefix),
         description=description,
-        callback=build_callback(fn, invoke),
+        callback=build_callback(fn, invoke, leading_options),
     )
 
 
@@ -161,17 +173,21 @@ class CommandGroupBuilder:
     """One top-level group plus its subgroups, refusing name clashes and overfull groups with errors that name the
     function responsible (discord.py's own errors only name the command)."""
 
-    def __init__(self, root: app_commands.Group, invoke: Invoke, package: ModuleType | None) -> None:
+    def __init__(
+        self, root: app_commands.Group, invoke: Invoke, package: ModuleType | None, leading_options: Mapping[str, Any]
+    ) -> None:
         self.root = root
         self.invoke = invoke
         self.package = package
+        self.leading_options = leading_options
         self.subgroups: dict[str, app_commands.Group] = {}
         self.origins: dict[str, str] = {}  # qualified command or subgroup name → the function that added it
         self.command_count = 0
 
     def add(self, fn: CommandFunc, group_name: str | None, *, strip_prefix: str = "") -> None:
         parent = self.root if group_name is None else self.subgroup(group_name, fn)
-        self.attach(parent, build_command(fn, self.invoke, strip_prefix=strip_prefix), qualified_name(fn))
+        command = build_command(fn, self.invoke, strip_prefix=strip_prefix, leading_options=self.leading_options)
+        self.attach(parent, command, qualified_name(fn))
         self.command_count += 1
 
     def subgroup(self, name: str, fn: CommandFunc) -> app_commands.Group:
@@ -208,6 +224,7 @@ def build_command_group(
     package: ModuleType | None = None,
     strip_prefix: str = "",
     functions: Iterable[CommandFunc] = (),
+    leading_options: Mapping[str, Any] = {},
     allowed_installs: app_commands.AppInstallationType | None = None,
     allowed_contexts: app_commands.AppCommandContext | None = None,
 ) -> app_commands.Group:
@@ -215,12 +232,13 @@ def build_command_group(
 
     Found commands go into a subgroup named after their module under `package` (unless `@command(group=)` says
     otherwise), described by that module's docstring, and lose `strip_prefix` from their function name. Listed
-    functions need no `@command`; they go to the top level unless `@command(group=)` names a subgroup.
+    functions need no `@command`; they go to the top level unless `@command(group=)` names a subgroup. Every command
+    starts with the `leading_options` (name → annotation with a `Desc`), all required.
     """
     root = app_commands.Group(
         name=name, description=description, allowed_installs=allowed_installs, allowed_contexts=allowed_contexts
     )
-    builder = CommandGroupBuilder(root, invoke, package)
+    builder = CommandGroupBuilder(root, invoke, package, leading_options)
     if package is not None:
         for fn in find_commands(package):
             group = command_meta(fn).group or group_from_module(fn.__module__, package.__name__)

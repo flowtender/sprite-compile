@@ -72,6 +72,32 @@ async def test_invoke_gets_the_function_and_its_arguments():
     invoke.assert_awaited_once_with(interaction, roll_pool, {"dice": 3, "mode": "careful", "limit": None})
 
 
+LABEL_OPTION = {"label": Annotated[str, Desc("What the roll is for.")]}
+
+
+async def test_leading_options_come_first_required_and_reach_invoke():
+    invoke = AsyncMock()
+    group = build_fixture_group(leading_options=LABEL_OPTION)
+    pool = next(c for c in group.walk_commands() if isinstance(c, app_commands.Command) and c.name == "roll_pool")
+    assert [(p.name, p.required) for p in pool.parameters] == [
+        ("label", True),
+        ("dice", True),
+        ("mode", False),
+        ("limit", False),
+    ]
+    assert pool.get_parameter("label").description == "What the roll is for."  # type: ignore[union-attr]
+
+    command = build_command(roll_pool, invoke, leading_options=LABEL_OPTION)
+    interaction = object()
+    await command.callback(interaction, label="Sneaking", dice=3)  # type: ignore[call-arg]
+    invoke.assert_awaited_once_with(interaction, roll_pool, {"label": "Sneaking", "dice": 3})
+
+
+def test_leading_option_clashing_with_a_parameter_is_rejected():
+    with pytest.raises(TypeError, match=r"roll_pool: parameters \['dice'\] clash"):
+        build_command(roll_pool, AsyncMock(), leading_options={"dice": Annotated[int, Desc("Dice.")]})
+
+
 def test_listed_functions_keep_their_name_and_go_to_the_top_level():
     def roll_flip() -> None:
         """Flip."""

@@ -41,7 +41,11 @@ class MessageHandles:
 
     def remember(self, response: discord.InteractionCallbackResponse) -> None:
         if isinstance(response.resource, discord.InteractionMessage):
-            self.by_id[response.resource.id] = response.resource
+            self.remember_message(response.resource)
+
+    def remember_message(self, message: discord.InteractionMessage) -> None:
+        """E.g. a component interaction's `original_response()`: the message the component is on."""
+        self.by_id[message.id] = message
 
     def get(self, message_id: int) -> discord.InteractionMessage | None:
         return self.by_id.get(message_id)
