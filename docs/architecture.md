@@ -77,6 +77,8 @@ itself: `pyproject.toml`, Containerfile (`FROM sprite-compile:X.Y`), CI workflow
 
 - One `config.toml` per instance. Defaults live in code (msgspec structs); the file holds only what differs.
 - Strict validation at startup: unknown keys and missing required keys are errors naming the key.
+- The base image sets `SPRITE_CONFIG` to the mounted file; without it (development) it is `config.toml` in the
+  platformdirs config dir. A missing file counts as empty.
 - `sprite config sync` (tomlkit, preserves comments and formatting) adds every missing key **commented out**, with its
   description, its default and the version that added it, so the code default keeps applying until uncommented:
   ```toml

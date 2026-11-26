@@ -6,7 +6,6 @@ only holds what can be lost (rows expire or are refreshed in use), so it is alwa
 
 from __future__ import annotations
 
-import os
 import re
 import sqlite3
 import time
@@ -15,36 +14,15 @@ from pathlib import Path
 from typing import Any
 
 import msgspec
-from platformdirs import PlatformDirs
 
 from .codec import MessageCodec
 
-DATA_DIR_ENV = "SPRITE_DATA_DIR"
 TABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 KEY_COLUMN_TYPES = {int: "INTEGER", str: "TEXT"}
 
 
 def epoch_seconds() -> int:
     return int(time.time())
-
-
-def instance_data_dir() -> Path | None:
-    value = os.environ.get(DATA_DIR_ENV)
-    return Path(value) if value else None
-
-
-def platform_dirs(app_name: str) -> PlatformDirs:
-    return PlatformDirs(appname=app_name, appauthor=False)
-
-
-def state_dir(app_name: str) -> Path:
-    """`$SPRITE_DATA_DIR` in a deployed instance, else the user state dir (development)."""
-    return instance_data_dir() or Path(platform_dirs(app_name).user_state_dir)
-
-
-def cache_dir(app_name: str) -> Path:
-    """`$SPRITE_DATA_DIR` in a deployed instance, else the user cache dir (development)."""
-    return instance_data_dir() or Path(platform_dirs(app_name).user_cache_dir)
 
 
 class DatabaseHandle:
