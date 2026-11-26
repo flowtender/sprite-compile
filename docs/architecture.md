@@ -43,7 +43,7 @@ several frontends sharing one database. `discord.py` becomes an optional extra o
   msgspec-native values (datetime, timedelta, UUID, sets, …) rebuilt from field type hints. Bots build the registry
   with `build_registry(packages)`, which runs `check_hints()` and fails on field types the codec can't round-trip; a
   bot's test suite should build its full registry once. Dataclasses sprite-compile stores itself (e.g.
-  `WebhookHandle`) are registered with every codec via `@library_type(tag)`; a bot class under one of their tags is
+  `MessageHandle`) are registered with every codec via `@library_type(tag)`; a bot class under one of their tags is
   rejected, and so is a second class under a tag (or alias) another class already has.
 - `config sync` / `config check` and `secrets list` as subcommands of each bot's own command (`run()` dispatches
   them; see below).
@@ -57,9 +57,13 @@ several frontends sharing one database. `discord.py` becomes an optional extra o
     4000-character limits; page buttons.
   - Notes kept across re-renders (a `TextDisplay` with a fixed `id`, read back via `walk_children()`).
   - Progress messages with rate-limited edits and a progress-callback shape.
-  - Editing a message after the 15-minute interaction token expires: cached `InteractionMessage` handle, falling back
-    to `get_partial_message` with the bot token.
-  - Interaction helpers: defer-if-needed, ephemeral followups with webhook expiry tracking, menu updates.
+  - Editing a message the bot sent earlier: through an interaction token stored per message in the cache database
+    (`MessageHandles`; a token edits for 15 minutes after its interaction, also across a restart and where the bot
+    can't see the channel), falling back to `get_partial_message` with the bot token. Tested 2026-11-20: an expired
+    token can't edit (401, error 50027).
+  - Interaction helpers: defer-if-needed, ephemeral followup menus that delete themselves before their token expires
+    and are rebuilt at the next start if a restart interrupts them (`MessageHandles.restore_menus` with the bot's
+    builder, from the stored `MenuOrigin`: the message it was opened from and who opened it), menu updates.
   - Multi-message cards: post / re-render / delete a card spanning several messages.
   - Validated modal inputs (`ValidLabel` wrappers with `validate()`: numbers, checkbox, radio and checkbox groups) and
     `BuiltModal`, whose fields are keyword arguments and whose `on_submit` gets the values by name (done).
@@ -85,7 +89,15 @@ python:3.14-slim
 ```
 Bots on the same base tag share its layers on disk. A bot left on an older tag keeps working (old tags stay in the
 registry) at the price of storing that base separately. Bot Containerfiles install their deps constrained to the
-versions already in the base, never upgrading them.
+versions already in the base, never upgrading them (`-c /opt/venv/constraints.txt`, exported from `uv.lock`).
+
+The base installs sprite-compile and its locked deps into `/opt/venv` (on `PATH`) and runs as user `sprite` (UID
+1000). Mount points: the data dir at `/data` (`SPRITE_DATA_DIR`), the config at `/config/config.toml`
+(`SPRITE_CONFIG`; its own directory so sync can replace the file), secrets at `/run/secrets` (`SPRITE_SECRETS_DIR`).
+Build: `podman build -t localhost/sprite-compile:0.1 .` in the repo root.
+
+uv is not in the base. Bot Containerfiles bind-mount it for their install step only, so it never lands in a layer:
+`RUN --mount=from=ghcr.io/astral-sh/uv:<version>,source=/uv,target=/bin/uv uv pip install --python /opt/venv/bin/python -c /opt/venv/constraints.txt .`
 
 ### Dev template
 Copier template in this repo, versioned by the same git tags as the library. Generates what each bot repo must contain

@@ -1,89 +1,107 @@
-"""Interaction helpers, from chance's `InteractionContext`: deferring, ephemeral followup menus that remember the
-message they were opened from, and editing a message the bot sent earlier.
+"""Interaction helpers, from chance's `InteractionContext`: deferring, ephemeral followup menus, and editing a message
+the bot sent earlier.
 
-Editing goes through the message's cached `InteractionMessage` first, then through a partial message with the bot
-token. The cached handle edits through the interaction's webhook, which also works where the bot can't see the
-channel (group DMs, DMs with other users); the partial message only works in channels the bot can access.
+Editing goes through an interaction token stored for the message first, then through a partial message with the bot
+token. The token edits through the interaction's webhook, which also works where the bot can't see the channel (group
+DMs, DMs with other users); the partial message only works in channels the bot can access. Tokens are kept in the cache
+database until they expire, so they keep working across a restart.
 """
 
 from __future__ import annotations
 
 import logging
-import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeGuard, runtime_checkable
 
 import discord
+from discord import ui
 
 from ..codec import library_type
 from ..storage import DatabaseHandle, ExpiringTable, epoch_seconds
 
 log = logging.getLogger(__name__)
 
-# An interaction's webhook token lasts 15 minutes; its responses and followups can only be edited (or deleted) through
-# it. 10 s of margin.
-FOLLOWUP_LIFETIME_SECONDS = 15 * 60 - 10
+# An interaction's webhook token lasts 15 minutes from the interaction; its responses and followups can only be edited
+# (or deleted) through it. 10 s of margin.
+TOKEN_LIFETIME_SECONDS = 15 * 60 - 10
 
 
-@library_type("WebhookHandle")
+@library_type("MenuOrigin")
 @dataclass(frozen=True)
-class WebhookHandle:
-    message_id: int
-    webhook_id: int
+class MenuOrigin:
+    """Where an ephemeral followup menu came from, to build it again after a restart."""
+
+    message_id: int | None  # the message whose component opened it
+    user_id: int  # who opened it
+
+
+@library_type("MessageHandle")
+@dataclass(frozen=True)
+class MessageHandle:
+    """An interaction token that can edit (or delete) a message, until `expires_at`."""
+
+    token: str
     expires_at: int
-    original_target: int | None  # the message the followup was opened from
+    menu: MenuOrigin | None = None  # set for an ephemeral followup menu, whose components die with the process
+
+
+type MenuBuilder = Callable[[MenuOrigin], ui.View | ui.LayoutView | None]
 
 
 class MessageHandles:
-    """The message objects of the bot's interaction responses and followups, by message ID, until their interaction's
-    webhook token expires. They edit through that webhook, which also works where the bot can't see the channel. An
-    expired token can't edit (Discord answers 401 Invalid Webhook Token), so they're neither stored nor kept longer;
-    after that, edits fall back to partial messages."""
+    """Interaction tokens for the bot's messages, by message ID, in the cache database until they expire. Whoever can
+    read the cache database can edit or delete those messages until then."""
 
-    def __init__(self, lifetime_seconds: float = FOLLOWUP_LIFETIME_SECONDS) -> None:
-        self.lifetime_seconds = lifetime_seconds
-        # (monotonic expiry, message), in expiry order: remembering a message again moves it to the end
-        self.by_id: dict[int, tuple[float, discord.InteractionMessage | discord.WebhookMessage]] = {}
-
-    def remember(self, response: discord.InteractionCallbackResponse) -> None:
-        if isinstance(response.resource, discord.InteractionMessage):
-            self.remember_message(response.resource)
-
-    def remember_message(self, message: discord.InteractionMessage | discord.WebhookMessage) -> None:
-        """E.g. a followup the bot sent, or a component interaction's `original_response()`: the message the component
-        is on, through the new interaction's token."""
-        self.forget_expired()
-        self.by_id.pop(message.id, None)
-        self.by_id[message.id] = (time.monotonic() + self.lifetime_seconds, message)
-
-    def get(self, message_id: int) -> discord.InteractionMessage | discord.WebhookMessage | None:
-        entry = self.by_id.get(message_id)
-        if entry is None or entry[0] <= time.monotonic():
-            return None
-        return entry[1]
-
-    def forget_expired(self) -> None:
-        now = time.monotonic()
-        while self.by_id:
-            message_id, (expires_at, _) = next(iter(self.by_id.items()))
-            if expires_at > now:
-                return
-            del self.by_id[message_id]
-
-
-class WebhookHandles:
-    """The bot's ephemeral followups by message ID, in the cache database until their webhook token expires."""
-
-    TABLE = "webhook_handles"
+    TABLE = "message_handles"
 
     def __init__(self, database: DatabaseHandle) -> None:
-        self.table = ExpiringTable(database, self.TABLE, int, WebhookHandle)
+        self.table = ExpiringTable(database, self.TABLE, int, MessageHandle)
 
-    def remember(self, handle: WebhookHandle) -> None:
-        self.table.set(handle.message_id, handle, expires_at=handle.expires_at)
+    def remember(
+        self, interaction: discord.Interaction, message_id: int, *, menu: MenuOrigin | None = None
+    ) -> MessageHandle:
+        """`message_id`: the interaction's response, one of its followups, or for a component interaction the message
+        the component is on."""
+        expires_at = int(interaction.created_at.timestamp()) + TOKEN_LIFETIME_SECONDS
+        handle = MessageHandle(interaction.token, expires_at, menu)
+        self.table.set(message_id, handle, expires_at=expires_at)
+        return handle
 
-    def get(self, message_id: int) -> WebhookHandle | None:
+    def get(self, message_id: int) -> MessageHandle | None:
         return self.table.get(message_id)
+
+    async def restore_menus(self, client: discord.Client, build_menu: MenuBuilder) -> None:
+        """Redraw the menus an earlier process left open with views from `build_menu`, so their components work again
+        in this one; each still deletes itself when its token expires. A menu `build_menu` gives None for is deleted."""
+        for message_id, handle in list(self.table.items()):
+            if handle.menu is None:
+                continue
+            webhook = handle_webhook(client, handle)
+            try:
+                view = build_menu(handle.menu)
+                if view is None:
+                    await webhook.delete_message(message_id)
+                    del self.table[message_id]
+                    log.info("Deleted menu %d: nothing to rebuild it from", message_id)
+                    continue
+                message = await webhook.edit_message(message_id, view=view)
+            except Exception as error:
+                log_message_failure("Restoring menu", message_id, error)
+                continue
+            await delete_when_expired(message, handle)
+            log.info("Restored menu %d", message_id)
+
+
+def handle_webhook(client: discord.Client, handle: MessageHandle) -> discord.Webhook:
+    """The interaction webhook `handle`'s token belongs to."""
+    assert client.application_id is not None
+    return discord.Webhook.partial(client.application_id, handle.token, client=client)
+
+
+async def delete_when_expired(message: discord.WebhookMessage, handle: MessageHandle) -> None:
+    """Delete `message` in the background just before `handle`'s token expires, after which it no longer could."""
+    await message.delete(delay=handle.expires_at - epoch_seconds())
 
 
 @runtime_checkable
@@ -109,7 +127,7 @@ async def defer_if_needed(interaction: discord.Interaction) -> None:
 UNKNOWN_MESSAGE = 10008  # Discord's error code for a message that doesn't exist (e.g. deleted)
 
 
-def log_edit_failure(attempt: str, message_id: int, error: Exception) -> None:
+def log_message_failure(attempt: str, message_id: int, error: Exception) -> None:
     """A deleted message gets one line; anything else gets its traceback."""
     if isinstance(error, discord.NotFound) and error.code == UNKNOWN_MESSAGE:
         log.info("%s %d failed: the message no longer exists", attempt, message_id)
@@ -120,18 +138,18 @@ def log_edit_failure(attempt: str, message_id: int, error: Exception) -> None:
 async def edit_message(
     interaction: discord.Interaction, message_id: int, handles: MessageHandles, **edit_args: Any
 ) -> bool:
-    """Edit a message the bot sent earlier: through its cached handle, else as a partial message in the interaction's
-    channel. Returns whether either worked; failures are logged. Doesn't respond to `interaction`."""
+    """Edit a message the bot sent earlier: through its stored interaction token, else as a partial message in the
+    interaction's channel. Returns whether either worked; failures are logged. Doesn't respond to `interaction`."""
     handle = handles.get(message_id)
     if handle is None:
-        log.info("Message key not cached: %d", message_id)
+        log.info("No interaction token stored for message %d", message_id)
     else:
         try:
-            await handle.edit(**edit_args)
-            log.info("Edited via cached message")
+            await handle_webhook(interaction.client, handle).edit_message(message_id, **edit_args)
+            log.info("Edited via stored interaction token")
             return True
         except Exception as error:
-            log_edit_failure("Editing via cached message", message_id, error)
+            log_message_failure("Editing via stored interaction token", message_id, error)
 
     channel = interaction.channel
     if not has_get_partial_message(channel):
@@ -140,27 +158,22 @@ async def edit_message(
     try:
         await channel.get_partial_message(message_id).edit(**edit_args)
     except Exception as error:
-        log_edit_failure("Editing via partial message", message_id, error)
+        log_message_failure("Editing via partial message", message_id, error)
         return False
     log.info("Edited via partial message")
     return True
 
 
 async def send_ephemeral_followup(
-    interaction: discord.Interaction, webhook_handles: WebhookHandles, **send_args: Any
+    interaction: discord.Interaction, handles: MessageHandles, **send_args: Any
 ) -> discord.WebhookMessage:
-    """Send an ephemeral followup (e.g. a menu) and remember which message it was opened from. It's deleted when its
-    webhook token is about to expire, since after that its components can no longer edit anything."""
-    original_target = interaction.message.id if interaction.message else None
+    """Send an ephemeral followup (e.g. a menu) that deletes itself when its interaction token is about to expire,
+    since after that its components can no longer edit anything. One still open when the process ends is rebuilt at the
+    next start (`MessageHandles.restore_menus`)."""
     message = await interaction.followup.send(wait=True, ephemeral=True, **send_args)
-    handle = WebhookHandle(
-        message_id=message.id,
-        webhook_id=interaction.followup.id,
-        expires_at=epoch_seconds() + FOLLOWUP_LIFETIME_SECONDS,
-        original_target=original_target,
-    )
-    webhook_handles.remember(handle)
-    await message.delete(delay=FOLLOWUP_LIFETIME_SECONDS)
+    origin = MenuOrigin(interaction.message.id if interaction.message else None, interaction.user.id)
+    handle = handles.remember(interaction, message.id, menu=origin)
+    await delete_when_expired(message, handle)
     return message
 
 
