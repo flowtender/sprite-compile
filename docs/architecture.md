@@ -1,14 +1,14 @@
 # Sprite architecture
 
-A shared core for discord.py bots ("sprites"), plus how they are packaged and deployed. Status: agreed design, nothing
-built yet.
+A shared core for discord.py bots ("sprites"), plus how they are packaged and deployed. Status: the library, the base
+image and the Discord frontend exist; the dev template and sprite-register do not yet. Planned parts are marked.
 
 ## Repositories
 
 | Repo | Contains |
 |---|---|
-| sprite-compile | core library (Python package), base image, dev template (Copier) |
-| sprite-register | instance template (Copier), deploy and secrets tooling |
+| sprite-compile | core library (Python package), base image; dev template (Copier, planned) |
+| sprite-register | planned: instance template (Copier), deploy and secrets tooling |
 
 Each bot lives in its own repo, so it can stay on an older sprite-compile version without being touched. The cost is
 cross-repo development; local work uses an editable install of sprite-compile.
@@ -47,43 +47,43 @@ several frontends sharing one database. `discord.py` becomes an optional extra o
   rejected, and so is a second class under a tag (or alias) another class already has.
 - `config sync` / `config check` and `secrets list` as subcommands of each bot's own command (`run()` dispatches
   them; see below).
-- UX primitives (penciled in, components v2: `LayoutView`, `Container`, `ui.Label`):
+- UX primitives (components v2: `LayoutView`, `Container`, `ui.Label`). Items marked done exist; the rest are planned:
   - Persistent buttons (`PersistentButton`, done): `DynamicItem`s whose `custom_id` (prefix plus typed fields, at
     most 100 characters) carries identifiers like a record ID, so they survive restarts; the data stays in the
     database. An `allowed()` gate per button with an ephemeral refusal. Classes register themselves when defined.
   - Views (`ContainerView`, done): a `LayoutView` with one `Container`, and text/separator/section/button helpers that
     pack buttons five to a row.
-  - Pagination: packing content into several `LayoutView` messages under Discord's 40-component, 30-interactive and
-    4000-character limits; page buttons.
-  - Notes kept across re-renders (a `TextDisplay` with a fixed `id`, read back via `walk_children()`).
-  - Progress messages with rate-limited edits and a progress-callback shape.
-  - Editing a message the bot sent earlier: through an interaction token stored per message in the cache database
-    (`MessageHandles`; a token edits for 15 minutes after its interaction, also across a restart and where the bot
-    can't see the channel), falling back to `get_partial_message` with the bot token. Tested 2026-11-20: an expired
-    token can't edit (401, error 50027).
-  - Interaction helpers: defer-if-needed, ephemeral followup menus that delete themselves before their token expires
-    and are rebuilt at the next start if a restart interrupts them (`MessageHandles.restore_menus` with the bot's
-    builder, from the stored `MenuOrigin`: the message it was opened from and who opened it), menu updates.
-  - Multi-message cards: post / re-render / delete a card spanning several messages.
+  - Pagination (planned): packing content into several `LayoutView` messages under Discord's 40-component,
+    30-interactive and 4000-character limits; page buttons.
+  - Notes kept across re-renders (planned): a `TextDisplay` with a fixed `id`, read back via `walk_children()`.
+  - Progress messages (planned) with rate-limited edits and a progress-callback shape.
+  - Editing a message the bot sent earlier (done): through an interaction token stored per message in the cache
+    database (`MessageHandles`; a token edits for 15 minutes after its interaction, also across a restart and where
+    the bot can't see the channel), falling back to `get_partial_message` with the bot token. Tested 2026-11-20: an
+    expired token can't edit (401, error 50027).
+  - Interaction helpers (done): defer-if-needed, ephemeral followup menus that delete themselves before their token
+    expires and are rebuilt at the next start if a restart interrupts them (`MessageHandles.restore_menus` with the
+    bot's builder, from the stored `MenuOrigin`: the message it was opened from and who opened it), menu updates.
+  - Multi-message cards (planned): post / re-render / delete a card spanning several messages.
   - Validated modal inputs (`ValidLabel` wrappers with `validate()`: numbers, checkbox, radio and checkbox groups) and
     `BuiltModal`, whose fields are keyword arguments and whose `on_submit` gets the values by name (done).
-  - Command definitions from typed functions (`sprite_compile.discord.commands`): `@command`, with signatures
+  - Command definitions from typed functions (done; `sprite_compile.discord.commands`): `@command`, with signatures
     synthesized from `Annotated[..., Desc(...)]` and `Choices`; each command hands `(interaction, function,
     arguments)` to the bot's `invoke`. `build_command_group` builds one top-level group from a package (subgroups from
     module paths, configurable name prefix stripping) and/or an explicit function list, with duplicate checks.
-  - Guild + global registration with a fresh `Command`/`Group` per registration (a command has one parent) and
+  - Guild + global registration (done) with a fresh `Command`/`Group` per registration (a command has one parent) and
     `allowed_contexts`.
-  - `key=value` argument autocomplete with alias, prefix and Levenshtein matching.
-  - Emojis: sync that warns and skips instead of failing, per-name unicode fallback.
-  - Keyed single-flight: per-key `asyncio.Event` claims so two messages don't do the same work.
-  - Serialization: a tagged-dataclass codec with type-hint-driven decoding.
+  - `key=value` argument autocomplete (planned) with alias, prefix and Levenshtein matching.
+  - Emojis (done): sync that warns and skips instead of failing, per-name unicode fallback.
+  - Keyed single-flight (planned): per-key `asyncio.Event` claims so two messages don't do the same work.
+  - Serialization (done): a tagged-dataclass codec with type-hint-driven decoding.
 
 Python 3.14. Published both as a Python package (for `uv run` and tests without containers) and as the base image.
 
 ### Base image
 ```
 python:3.14-slim
-└─ sprite-compile:X.Y      discord.py, msgspec, tomlkit, sprite_compile
+└─ sprite-compile:X.Y      discord.py, msgspec, pillow, platformdirs, tomlkit, sprite_compile
    ├─ bot-a                bot code + its own deps
    └─ bot-b
 ```
@@ -96,12 +96,20 @@ The base installs sprite-compile and its locked deps into `/opt/venv` (on `PATH`
 (`SPRITE_CONFIG`; its own directory so sync can replace the file), secrets at `/run/secrets` (`SPRITE_SECRETS_DIR`).
 Build: `podman build -t localhost/sprite-compile:0.1 .` in the repo root.
 
-uv is not in the base. Bot Containerfiles bind-mount it for their install step only, so it never lands in a layer:
-`RUN --mount=from=ghcr.io/astral-sh/uv:<version>,source=/uv,target=/bin/uv uv pip install --python /opt/venv/bin/python -c /opt/venv/constraints.txt .`
+uv is not in the base. Bot Containerfiles bind-mount it for their install step only, so it never lands in a layer,
+and install as root (the venv is root's; the bot runs as `sprite`). `--no-sources` makes the bot use the base's
+sprite-compile instead of the path source its `pyproject.toml` has for development:
+```dockerfile
+USER root
+RUN --mount=from=ghcr.io/astral-sh/uv:<version>,source=/uv,target=/bin/uv \
+    uv pip install --python /opt/venv/bin/python --no-sources --compile-bytecode -c /opt/venv/constraints.txt /src
+USER sprite
+```
 
-### Dev template
-Copier template in this repo, versioned by the same git tags as the library. Generates what each bot repo must contain
-itself: `pyproject.toml`, Containerfile (`FROM sprite-compile:X.Y`), CI workflow, `config` model skeleton, test setup.
+### Dev template (planned)
+Copier template in this repo, versioned by the same git tags as the library. Will generate what each bot repo must
+contain itself: `pyproject.toml`, Containerfile (`FROM sprite-compile:X.Y`), CI workflow, `config` model skeleton, test
+setup.
 `copier update` merges later template changes into existing bots, keeping local edits.
 
 ## Config
