@@ -49,6 +49,24 @@ async def test_extensions_commands_are_registered_globally():
     bot.http.bulk_upsert_guild_commands.assert_not_awaited()
 
 
+class EmojiPingSprite(PingSprite):
+    emoji_package = "discord_fixtures.emojis"
+
+
+async def test_package_emojis_are_ready_when_extensions_load():
+    bot = EmojiPingSprite(DiscordSettings(), intents=discord.Intents.none(), application_id=APPLICATION_ID)
+    bot.http.bulk_upsert_global_commands = AsyncMock(return_value=[])
+    dice = discord.PartialEmoji(name="dice", id=7)
+    bot.fetch_application_emojis = AsyncMock(side_effect=[[], [dice]])
+    bot.create_application_emoji = AsyncMock(return_value=dice)
+
+    await bot.setup_hook()
+
+    bot.create_application_emoji.assert_awaited_once()
+    assert bot.create_application_emoji.await_args.kwargs["name"] == "dice"
+    assert bot.emojis_at_extension_load.get("dice", "🎲") == "<:dice:7>"
+
+
 async def test_guild_only_removes_previous_global_commands():
     bot = make_bot(guild_id=GUILD_ID, global_commands=False)
     await bot.setup_hook()

@@ -1,17 +1,22 @@
-"""`DiscordSprite`, a `commands.Bot` that loads its extensions, registers their slash commands and keeps its username.
+"""`DiscordSprite`, a `commands.Bot` that syncs its application emojis, loads its extensions, registers their slash
+commands and keeps its username.
 
-The steps are plain functions too (`sync_commands`, `sync_username`), so a bot that doesn't fit the base class can call
-them itself. A bot embeds `DiscordSettings` in its config as the `[discord]` table and lists its extensions:
+The steps are plain functions too (`sync_application_emojis`, `sync_commands`, `sync_username`), so a bot that doesn't
+fit the base class can call them itself. A bot embeds `DiscordSettings` in its config as the `[discord]` table and
+lists its extensions and the package holding its emoji images:
 
     class ChanceSprite(DiscordSprite):
         extensions = ("chance_sprite.command_loader",)
+        emoji_package = "chance_sprite.emojis"
 
-Extensions add their commands to the global tree; `sync_commands` copies them to the guild when one is configured.
+Emojis are synced before the extensions load, so `self.app_emojis` is ready for them. Extensions add their commands to
+the global tree; `sync_commands` copies them to the guild when one is configured.
 """
 
 from __future__ import annotations
 
 import logging
+from importlib import resources
 from typing import Annotated, Any
 
 import discord
@@ -19,6 +24,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from .config import ConfigSection, Setting
+from .emojis import AppEmojis, sync_application_emojis
 
 log = logging.getLogger(__name__)
 
@@ -70,13 +76,17 @@ async def sync_username(client: discord.Client, username: str | None) -> None:
 
 class DiscordSprite(commands.Bot):
     extensions: tuple[str, ...] = ()
+    emoji_package: str | None = None
 
     def __init__(self, settings: DiscordSettings, *, intents: discord.Intents, **options: Any) -> None:
         options.setdefault("command_prefix", commands.when_mentioned)  # slash commands only; prefix is never used
         super().__init__(intents=intents, **options)
         self.discord_settings = settings
+        self.app_emojis = AppEmojis()
 
     async def setup_hook(self) -> None:
+        if self.emoji_package is not None:
+            self.app_emojis = await sync_application_emojis(self, resources.files(self.emoji_package))
         for extension in self.extensions:
             await self.load_extension(extension)
         await sync_commands(
