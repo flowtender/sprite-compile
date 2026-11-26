@@ -33,21 +33,23 @@ class WebhookHandle:
 
 
 class MessageHandles:
-    """The `InteractionMessage` of every interaction response the bot sent, by message ID, for this process's lifetime.
-    They can't be stored: after a restart, edits fall back to partial messages."""
+    """The message objects of the bot's interaction responses and followups, by message ID, for this process's lifetime.
+    They edit through their interaction's webhook, which also works where the bot can't see the channel. They can't be
+    stored: after a restart, edits fall back to partial messages."""
 
     def __init__(self) -> None:
-        self.by_id: dict[int, discord.InteractionMessage] = {}
+        self.by_id: dict[int, discord.InteractionMessage | discord.WebhookMessage] = {}
 
     def remember(self, response: discord.InteractionCallbackResponse) -> None:
         if isinstance(response.resource, discord.InteractionMessage):
             self.remember_message(response.resource)
 
-    def remember_message(self, message: discord.InteractionMessage) -> None:
-        """E.g. a component interaction's `original_response()`: the message the component is on."""
+    def remember_message(self, message: discord.InteractionMessage | discord.WebhookMessage) -> None:
+        """E.g. a followup the bot sent, or a component interaction's `original_response()`: the message the component
+        is on."""
         self.by_id[message.id] = message
 
-    def get(self, message_id: int) -> discord.InteractionMessage | None:
+    def get(self, message_id: int) -> discord.InteractionMessage | discord.WebhookMessage | None:
         return self.by_id.get(message_id)
 
 
@@ -86,6 +88,17 @@ async def defer_if_needed(interaction: discord.Interaction) -> None:
         log.info("Could not defer the interaction", exc_info=True, stack_info=True)
 
 
+UNKNOWN_MESSAGE = 10008  # Discord's error code for a message that doesn't exist (e.g. deleted)
+
+
+def log_edit_failure(attempt: str, message_id: int, error: Exception) -> None:
+    """A deleted message gets one line; anything else gets its traceback."""
+    if isinstance(error, discord.NotFound) and error.code == UNKNOWN_MESSAGE:
+        log.info("%s %d failed: the message no longer exists", attempt, message_id)
+    else:
+        log.info("%s %d failed", attempt, message_id, exc_info=error)
+
+
 async def edit_message(
     interaction: discord.Interaction, message_id: int, handles: MessageHandles, **edit_args: Any
 ) -> bool:
@@ -99,8 +112,8 @@ async def edit_message(
             await handle.edit(**edit_args)
             log.info("Edited via cached message")
             return True
-        except Exception:
-            log.info("Error editing cached message %d", message_id, exc_info=True)
+        except Exception as error:
+            log_edit_failure("Editing via cached message", message_id, error)
 
     channel = interaction.channel
     if not has_get_partial_message(channel):
@@ -108,8 +121,8 @@ async def edit_message(
         return False
     try:
         await channel.get_partial_message(message_id).edit(**edit_args)
-    except Exception:
-        log.info("Failed to edit message %d via partial message", message_id, exc_info=True)
+    except Exception as error:
+        log_edit_failure("Editing via partial message", message_id, error)
         return False
     log.info("Edited via partial message")
     return True

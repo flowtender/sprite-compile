@@ -226,6 +226,19 @@ def test_alias_decodes_old_tag():
     assert codec.dataclass_from_dict({"type": "OldDie", "sides": 6}) == Die(6)
 
 
+def test_tag_taken_by_another_class_is_rejected():
+    codec = MessageCodec()
+    codec.alias("OldDie")(Die)
+
+    @dataclass
+    class Coin:
+        heads: bool
+
+    with pytest.raises(TypeError, match="Coin: the tag 'OldDie' is already taken by Die"):
+        codec.alias("OldDie")(Coin)
+    codec.alias("OldDie")(Die)  # the same class again is fine
+
+
 def test_registered_tag_is_not_inherited_by_subclasses():
     codec = MessageCodec()
 

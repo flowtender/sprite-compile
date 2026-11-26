@@ -101,14 +101,19 @@ class MessageCodec:
             for mod in iter_public_modules(pkg):
                 for obj in vars(mod).values():
                     if isinstance(obj, type) and is_dataclass(obj) and obj.__module__ == mod.__name__:
-                        self.registry[own_tag(obj)] = obj
+                        self.claim_tag(own_tag(obj), obj)
         self.check_hints()
+
+    def claim_tag(self, tag: str, cls: type) -> None:
+        if (taken_by := self.registry.get(tag)) not in (None, cls):
+            raise TypeError(f"{cls.__qualname__}: the tag {tag!r} is already taken by {taken_by.__qualname__}")
+        self.registry[tag] = cls
 
     def add(self, tag: str, cls: type) -> None:
         check_no_tag_field(cls)
         if clash := library_tag_clash(tag, cls):
             raise TypeError(clash)
-        self.registry[tag] = cls
+        self.claim_tag(tag, cls)
 
     def register(self, tag: str) -> Callable[[type], type]:
         """Register a class under `tag` and encode it with that tag."""

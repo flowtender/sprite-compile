@@ -113,7 +113,18 @@ async def test_edit_reports_failure_when_no_way_works(caplog: pytest.LogCaptureF
 
     assert not await edit_message(failing, ROLL_MESSAGE, MessageHandles(), view="new view")
     assert not await edit_message(unreachable, ROLL_MESSAGE, MessageHandles(), view="new view")
-    assert "Failed to edit message 300 via partial message" in caplog.text
+    assert "Editing via partial message 300 failed" in caplog.text
+    assert "Invalid Webhook Token" in caplog.text  # an unexpected failure keeps its traceback
+
+
+async def test_deleted_message_is_logged_without_a_traceback(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.INFO)
+    deleted = discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), {"code": 10008, "message": "Unknown"})
+    interaction = fake_interaction(channel=FakeChannel(AsyncMock(side_effect=deleted)))
+
+    assert not await edit_message(interaction, ROLL_MESSAGE, handles_with(AsyncMock(side_effect=deleted)), view="v")
+    assert caplog.text.count("300 failed: the message no longer exists") == 2
+    assert "Traceback" not in caplog.text
 
 
 async def test_followup_remembers_the_message_it_was_opened_from(webhook_handles: WebhookHandles):
