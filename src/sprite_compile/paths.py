@@ -9,6 +9,8 @@ from platformdirs import PlatformDirs
 
 DATA_DIR_ENV = "SPRITE_DATA_DIR"
 CONFIG_FILE_ENV = "SPRITE_CONFIG"
+SECRETS_DIR_ENV = "SPRITE_SECRETS_DIR"
+INSTANCE_ENV = "SPRITE_INSTANCE"
 
 
 def env_path(name: str) -> Path | None:
@@ -33,3 +35,13 @@ def cache_dir(app_name: str) -> Path:
 def config_path(app_name: str) -> Path:
     """`$SPRITE_CONFIG` in a deployed instance, else `config.toml` in the user config dir."""
     return env_path(CONFIG_FILE_ENV) or Path(platform_dirs(app_name).user_config_dir) / "config.toml"
+
+
+def secrets_dir(app_name: str) -> Path:
+    """`$SPRITE_SECRETS_DIR` in a deployed instance (Podman's `/run/secrets`), else `secrets/` in the user config dir."""
+    return env_path(SECRETS_DIR_ENV) or Path(platform_dirs(app_name).user_config_dir) / "secrets"
+
+
+def instance_name() -> str | None:
+    """The deployed instance's name, set by its quadlet; None in development."""
+    return os.environ.get(INSTANCE_ENV) or None

@@ -108,12 +108,16 @@ itself: `pyproject.toml`, Containerfile (`FROM sprite-compile:X.Y`), CI workflow
   }
   ```
 - Stored as Podman secrets named `<instance>.<name>`, mounted read-only at `/run/secrets/<name>`. Never in the
-  environment, `podman inspect`, Copier answers, or git.
+  environment, `podman inspect`, Copier answers, or git. The base image sets `SPRITE_SECRETS_DIR=/run/secrets`;
+  without it (development) each secret is a file in `secrets/` in the platformdirs config dir. A missing or empty
+  file counts as not set; the trailing newline is stripped.
 - `sprite-register secrets <instance>`: reads the declarations from the image, shows each as set / missing / optional,
   prompts for missing ones with hidden input. `secrets set <instance> <name>` rotates one
   (`podman secret create --replace`) and restarts the instance.
 - The pre-start step only reports: a missing required secret fails the start with a message naming it and the command
-  to fix it.
+  to fix it (`sprite-register secrets <instance>`; the quadlet passes the instance name as `SPRITE_INSTANCE`). `<bot>
+  secrets list` shows each declared secret as set / missing / not set (optional), never the values, and exits 1 when
+  a required one is missing.
 - Podman's default driver stores secrets unencrypted, root-only, under `/var/lib/containers`. Later option: sops + age
   encrypted in git (fits NixOS via sops-nix), feeding the same Podman secrets.
 
