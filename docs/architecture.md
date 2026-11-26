@@ -23,7 +23,9 @@ it for long-term service).
   from package assets, username sync.
 - `run(BotClass, ConfigModel, SECRETS)`: logging, config load and validation, secrets, readiness notification, start.
 - Storage: SQLite only, in the instance's `data/`: a state database (typed tables, int or str keys) and a separate
-  cache database (rows with `expires_at`), which is always safe to delete. No JSON state files.
+  cache database (rows with `expires_at`), which is always safe to delete. No JSON state files. The base image sets
+  `SPRITE_DATA_DIR` to the data mount; without it (development) the databases go to the platformdirs state and cache
+  dirs.
 - Codec (`sprite_compile.codec`): registered dataclasses ↔ tagged plain data for msgpack; enums by member name;
   msgspec-native values (datetime, timedelta, UUID, sets, …) rebuilt from field type hints. Bots build the registry
   with `build_registry(packages)`, which runs `check_hints()` and fails on field types the codec can't round-trip; a
