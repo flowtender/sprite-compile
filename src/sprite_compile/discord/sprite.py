@@ -1,5 +1,5 @@
-"""`DiscordSprite`, the Discord frontend: a `commands.Bot` that loads its extensions, syncs its application emojis,
-registers its slash commands and keeps its username.
+"""`DiscordSprite`, the Discord frontend: a `commands.Bot` that loads its extensions, registers its persistent buttons,
+syncs its application emojis, registers its slash commands and keeps its username.
 
 The steps are plain functions too (`sync_application_emojis`, `sync_commands`, `sync_username`), so a bot that doesn't
 fit the base class can call them itself. A bot embeds `DiscordSettings` in its config as the `[discord]` table, adds
@@ -13,7 +13,9 @@ fit the base class can call them itself. A bot embeds `DiscordSettings` in its c
 
     ChanceSprite(config.discord, token=secrets["discord_token"], intents=discord.Intents.default())
 
-`prepare()` loads the extensions before READY, so a broken extension fails the start and the release is rolled back.
+`prepare()` loads the extensions before READY, so a broken extension (or a duplicate persistent button prefix in a
+module it imports) fails the start and the release is rolled back. Every `PersistentButton` defined by then is
+registered with discord.py at login.
 Emojis are synced after login, so extensions read `self.app_emojis` when they render, not when they load; until the
 sync, every lookup gets its fallback. Extensions add their commands to the global tree; `sync_commands` copies them to
 the guild when one is configured.
@@ -32,6 +34,7 @@ from discord.ext import commands
 from ..config import ConfigSection, Setting
 from ..secrets import Secret
 from .emojis import AppEmojis, sync_application_emojis
+from .persistent import PERSISTENT_BUTTONS
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +111,8 @@ class DiscordSprite(commands.Bot):
             await self.close()
 
     async def setup_hook(self) -> None:
+        # On every login: clear() (before a reconnect attempt) drops the registered dynamic items.
+        self.add_dynamic_items(*PERSISTENT_BUTTONS.values())
         if self.emoji_package is not None:
             self.app_emojis = await sync_application_emojis(self, resources.files(self.emoji_package))
         await sync_commands(

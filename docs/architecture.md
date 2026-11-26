@@ -47,9 +47,11 @@ several frontends sharing one database. `discord.py` becomes an optional extra o
 - `config sync` / `config check` and `secrets list` as subcommands of each bot's own command (`run()` dispatches
   them; see below).
 - UX primitives (penciled in, components v2: `LayoutView`, `Container`, `ui.Label`):
-  - Persistent buttons as `DynamicItem`s with regex `custom_id` templates carrying their state, so they survive
-    restarts without a database record.
-  - Access gate: an `interaction_check` mixin, plus per-message owner lists.
+  - Persistent buttons (`PersistentButton`, done): `DynamicItem`s whose `custom_id` (prefix plus typed fields, at
+    most 100 characters) carries identifiers like a record ID, so they survive restarts; the data stays in the
+    database. An `allowed()` gate per button with an ephemeral refusal. Classes register themselves when defined.
+  - Views (`ContainerView`, done): a `LayoutView` with one `Container`, and text/separator/section/button helpers that
+    pack buttons five to a row.
   - Pagination: packing content into several `LayoutView` messages under Discord's 40-component, 30-interactive and
     4000-character limits; page buttons.
   - Notes kept across re-renders (a `TextDisplay` with a fixed `id`, read back via `walk_children()`).
@@ -58,8 +60,8 @@ several frontends sharing one database. `discord.py` becomes an optional extra o
     to `get_partial_message` with the bot token.
   - Interaction helpers: defer-if-needed, ephemeral followups with webhook expiry tracking, menu updates.
   - Multi-message cards: post / re-render / delete a card spanning several messages.
-  - Validated modal inputs (`ui.Label` wrappers with `validate()`), modals built from fields plus a transform
-    callback, buttons that open them.
+  - Validated modal inputs (`ValidLabel` wrappers with `validate()`: numbers, checkbox, radio and checkbox groups) and
+    `BuiltModal`, whose fields are keyword arguments and whose `on_submit` gets the values by name (done).
   - Command definitions from typed functions (`sprite_compile.discord.commands`): `@command`, with signatures
     synthesized from `Annotated[..., Desc(...)]` and `Choices`; each command hands `(interaction, function,
     arguments)` to the bot's `invoke`. `build_command_group` builds one top-level group from a package (subgroups from

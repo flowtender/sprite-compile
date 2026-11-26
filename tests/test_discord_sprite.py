@@ -7,6 +7,7 @@ import discord
 import pytest
 from discord.ext import commands
 
+from button_fixtures.buttons import EdgeButton, MenuButton, RollButton
 from sprite_compile.config import check_settings, load_config
 from sprite_compile.discord.sprite import DiscordSettings, DiscordSprite, sync_username
 
@@ -83,6 +84,19 @@ class BrokenSprite(DiscordSprite):
 async def test_broken_extension_fails_prepare():
     with pytest.raises(commands.ExtensionFailed, match="Duplicate command"):
         await make_bot(BrokenSprite).prepare()
+
+
+def registered_dynamic_items(bot: DiscordSprite) -> set[type]:
+    return set(bot._connection._view_store._dynamic_items.values())
+
+
+async def test_persistent_buttons_are_registered_again_after_a_reconnect():
+    bot = make_bot()
+    await start(bot)
+    bot._connection.clear()  # the part of serve()'s clear() that drops them; the rest needs a real start first
+    await bot.setup_hook()
+    assert {EdgeButton, MenuButton} <= registered_dynamic_items(bot)
+    assert RollButton not in registered_dynamic_items(bot)
 
 
 async def test_serve_reopens_the_client_for_the_next_attempt():
