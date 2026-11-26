@@ -1,4 +1,4 @@
-"""`DiscordSprite`, a `commands.Bot` that syncs its application emojis, loads its extensions, registers their slash
+"""`DiscordSprite`, a `commands.Bot` that loads its extensions, syncs its application emojis, registers its slash
 commands and keeps its username.
 
 The steps are plain functions too (`sync_application_emojis`, `sync_commands`, `sync_username`), so a bot that doesn't
@@ -6,11 +6,13 @@ fit the base class can call them itself. A bot embeds `DiscordSettings` in its c
 lists its extensions and the package holding its emoji images:
 
     class ChanceSprite(DiscordSprite):
-        extensions = ("chance_sprite.command_loader",)
+        extension_names = ("chance_sprite.command_loader",)
         emoji_package = "chance_sprite.emojis"
 
-Emojis are synced before the extensions load, so `self.app_emojis` is ready for them. Extensions add their commands to
-the global tree; `sync_commands` copies them to the guild when one is configured.
+`run()` loads the extensions before logging in, so a broken extension fails the start before READY and the release is
+rolled back. Emojis are synced after login, so extensions read `self.app_emojis` when they render, not when they load;
+until the sync, every lookup gets its fallback. Extensions add their commands to the global tree; `sync_commands`
+copies them to the guild when one is configured.
 """
 
 from __future__ import annotations
@@ -75,7 +77,7 @@ async def sync_username(client: discord.Client, username: str | None) -> None:
 
 
 class DiscordSprite(commands.Bot):
-    extensions: tuple[str, ...] = ()
+    extension_names: tuple[str, ...] = ()
     emoji_package: str | None = None
 
     def __init__(self, settings: DiscordSettings, *, intents: discord.Intents, **options: Any) -> None:
@@ -84,11 +86,13 @@ class DiscordSprite(commands.Bot):
         self.discord_settings = settings
         self.app_emojis = AppEmojis()
 
+    async def load_extensions(self) -> None:
+        for name in self.extension_names:
+            await self.load_extension(name)
+
     async def setup_hook(self) -> None:
         if self.emoji_package is not None:
             self.app_emojis = await sync_application_emojis(self, resources.files(self.emoji_package))
-        for extension in self.extensions:
-            await self.load_extension(extension)
         await sync_commands(
             self.tree, guild_id=self.discord_settings.guild_id, global_commands=self.discord_settings.global_commands
         )

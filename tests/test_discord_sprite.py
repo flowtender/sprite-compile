@@ -14,7 +14,7 @@ GUILD_ID = 2000
 
 
 class PingSprite(DiscordSprite):
-    extensions = ("discord_fixtures.ping",)
+    extension_names = ("discord_fixtures.ping",)
 
 
 def make_bot(**settings) -> PingSprite:
@@ -22,6 +22,12 @@ def make_bot(**settings) -> PingSprite:
     bot.http.bulk_upsert_global_commands = AsyncMock(return_value=[])
     bot.http.bulk_upsert_guild_commands = AsyncMock(return_value=[])
     return bot
+
+
+async def start(bot: DiscordSprite) -> None:
+    """What `run()` and discord.py do before the bot is ready, minus the Discord login."""
+    await bot.load_extensions()
+    await bot.setup_hook()
 
 
 def global_names(bot: PingSprite) -> list[str]:
@@ -43,7 +49,7 @@ def test_settings_are_all_optional_and_documented(tmp_path):
 
 async def test_extensions_commands_are_registered_globally():
     bot = make_bot()
-    await bot.setup_hook()
+    await start(bot)
 
     assert global_names(bot) == ["ping"]
     bot.http.bulk_upsert_guild_commands.assert_not_awaited()
@@ -53,23 +59,24 @@ class EmojiPingSprite(PingSprite):
     emoji_package = "discord_fixtures.emojis"
 
 
-async def test_package_emojis_are_ready_when_extensions_load():
+async def test_package_emojis_are_synced():
     bot = EmojiPingSprite(DiscordSettings(), intents=discord.Intents.none(), application_id=APPLICATION_ID)
     bot.http.bulk_upsert_global_commands = AsyncMock(return_value=[])
     dice = discord.PartialEmoji(name="dice", id=7)
     bot.fetch_application_emojis = AsyncMock(side_effect=[[], [dice]])
     bot.create_application_emoji = AsyncMock(return_value=dice)
+    assert bot.app_emojis.get("dice", "🎲") == "🎲"
 
-    await bot.setup_hook()
+    await start(bot)
 
     bot.create_application_emoji.assert_awaited_once()
     assert bot.create_application_emoji.await_args.kwargs["name"] == "dice"
-    assert bot.emojis_at_extension_load.get("dice", "🎲") == "<:dice:7>"
+    assert bot.app_emojis.get("dice", "🎲") == "<:dice:7>"
 
 
 async def test_guild_only_removes_previous_global_commands():
     bot = make_bot(guild_id=GUILD_ID, global_commands=False)
-    await bot.setup_hook()
+    await start(bot)
 
     assert guild_names(bot) == ["ping"]
     assert global_names(bot) == []
@@ -77,7 +84,7 @@ async def test_guild_only_removes_previous_global_commands():
 
 async def test_guild_and_global_register_both():
     bot = make_bot(guild_id=GUILD_ID)
-    await bot.setup_hook()
+    await start(bot)
 
     assert guild_names(bot) == ["ping"]
     assert global_names(bot) == ["ping"]

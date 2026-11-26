@@ -19,10 +19,13 @@ it for long-term service).
 ## sprite-compile
 
 ### Library
-- `DiscordSprite(commands.Bot)`: loads extensions/cogs, guild and/or global command registration, application emoji
-  sync from package assets, username sync. Its steps are also plain functions, for bots that don't fit the base class.
-  Shared settings (`guild_id`, `global_commands`, `username`) come from `DiscordSettings`, embedded as `[discord]`.
-- `run(BotClass, ConfigModel, SECRETS)`: logging, config load and validation, secrets, readiness notification, start.
+- `DiscordSprite(commands.Bot)`: loads the extensions it lists in `extension_names`, guild and/or global command
+  registration, application emoji sync from package assets (read lazily, with per-name fallbacks), username sync. Its
+  steps are also plain functions, for bots that don't fit the base class. Shared settings (`guild_id`,
+  `global_commands`, `username`) come from `DiscordSettings`, embedded as `[discord]`.
+- `run(app_name, ConfigModel, SECRETS, make_bot)`: the bot's whole command line. Logging (`$LOG_LEVEL`; no timestamps
+  under systemd), config, secrets (the token is the `discord_token` secret), `make_bot(config, secrets)`, extensions,
+  READY, then the Discord login; `config sync|check` and `secrets list` as subcommands.
 - Storage: SQLite only, in the instance's `data/`: a state database (typed tables, int or str keys) and a separate
   cache database (rows with `expires_at`), which is always safe to delete. No JSON state files. The base image sets
   `SPRITE_DATA_DIR` to the data mount; without it (development) the databases go to the platformdirs state and cache
@@ -179,15 +182,20 @@ flowchart LR
 - Instances update through Podman's own `podman-auto-update` (`AutoUpdate=registry` and a fully qualified `Image=`).
   The stock rootful timer runs daily with up to 15 min random delay; override `OnCalendar=` for more often. Rollback is
   on by default: if restarting the unit doesn't succeed, the previous image is retagged and restarted.
-- What counts as "started" decides what gets rolled back. Quadlets use `Notify=true` (`--sdnotify=container`):
-  sprite-compile writes `READY=1` to `$NOTIFY_SOCKET` only after config validation passed and the Discord login
-  succeeded (`on_ready`). An image that crashes on startup, fails validation, or never logs in fails the start (at
-  the latest at `TimeoutStartSec`) and is rolled back. With the default (`conmon` notify) the unit counts as started
-  as soon as the container runs, so none of that would roll back.
+- What counts as "started" decides what gets rolled back. Podman has no other signal: auto-update rolls back exactly
+  when restarting the unit fails. Quadlets use `Notify=true` (`--sdnotify=container`), and `run()` writes `READY=1`
+  to `$NOTIFY_SOCKET` once the config validated, the secrets loaded, the bot was built and its extensions loaded,
+  before connecting to Discord. An image that crashes on startup, fails validation, lacks a required secret or has a
+  broken extension fails the start (at the latest at `TimeoutStartSec`) and is rolled back. With the default
+  (`conmon` notify) the unit counts as started as soon as the container runs, so none of that would roll back.
+- Failures after READY are treated as transient, not as a bad release: Discord being slow or down, an expired token,
+  rate limits. The process exits and systemd restarts it with a growing delay (`Restart=on-failure`, `RestartSec=`,
+  `RestartSteps=`, `RestartMaxDelaySec=`; systemd ≥ 254), so it keeps retrying slowly instead of hitting the start
+  limit and staying failed. Gateway drops while running never reach systemd: discord.py reconnects by itself.
 - The config sync/check `ExecStartPre=` runs the new image, so a release whose config fails validation fails the
   start and rolls back too [inferred from systemd semantics; verify].
-- Not covered: a crash after READY. `Restart=on-failure` handles transient crashes; a release that crashes later is
-  fixed by pushing a new one.
+- Not covered: a release bug that only shows after READY (e.g. a command payload Discord rejects). It crash-loops
+  with the restart delay and is fixed by pushing a new release.
 - Private images: root's registry login, `sudo podman login <registry>`, ends up in `/run/containers/0/auth.json`,
   which is cleared on reboot. Point auto-update at a persistent file instead (`io.containers.autoupdate.authfile` label
   or `REGISTRY_AUTH_FILE`).

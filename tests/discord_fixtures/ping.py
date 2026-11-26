@@ -9,5 +9,4 @@ async def ping(interaction: discord.Interaction) -> None:
 
 
 async def setup(bot: commands.Bot) -> None:
-    bot.emojis_at_extension_load = bot.app_emojis
     bot.tree.add_command(ping)
