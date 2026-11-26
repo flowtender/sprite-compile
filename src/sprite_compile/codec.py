@@ -9,8 +9,6 @@ timedelta, UUID, Decimal, sets, bytes, …) pass through to msgspec and are rebu
 
 from __future__ import annotations
 
-import importlib
-import pkgutil
 import sys
 from dataclasses import fields, is_dataclass
 from datetime import date, datetime, time, timedelta
@@ -21,6 +19,8 @@ from typing import Annotated, Any, Callable, Literal, TypeVar, Union, get_args, 
 from uuid import UUID
 
 import msgspec
+
+from .modules import iter_public_modules
 
 TAG_KEY = "type"
 
@@ -98,15 +98,7 @@ class MessageCodec:
         """Register every dataclass defined in the given packages' public modules under its tag, then
         `check_hints()`. Dataclasses a module only imports are left to the package that defines them."""
         for pkg in packages:
-            for m in pkgutil.walk_packages(pkg.__path__, pkg.__name__ + "."):
-                if m.ispkg:
-                    continue
-                leaf = m.name.rsplit(".", 1)[-1]
-                if leaf.startswith("_"):
-                    continue
-
-                mod = importlib.import_module(m.name)
-
+            for mod in iter_public_modules(pkg):
                 for obj in vars(mod).values():
                     if isinstance(obj, type) and is_dataclass(obj) and obj.__module__ == mod.__name__:
                         self.registry[own_tag(obj)] = obj

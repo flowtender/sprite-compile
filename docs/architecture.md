@@ -60,9 +60,10 @@ several frontends sharing one database. `discord.py` becomes an optional extra o
   - Multi-message cards: post / re-render / delete a card spanning several messages.
   - Validated modal inputs (`ui.Label` wrappers with `validate()`), modals built from fields plus a transform
     callback, buttons that open them.
-  - Command definitions from typed functions: a decorator plus signature synthesis from
-    `Annotated[..., Desc(...)]` and `Choices`; package-based command discovery with subgroups from module paths and
-    duplicate checks; explicit command lists remain possible.
+  - Command definitions from typed functions (`sprite_compile.discord.commands`): `@command`, with signatures
+    synthesized from `Annotated[..., Desc(...)]` and `Choices`; each command hands `(interaction, function,
+    arguments)` to the bot's `invoke`. `build_command_group` builds one top-level group from a package (subgroups from
+    module paths, configurable name prefix stripping) and/or an explicit function list, with duplicate checks.
   - Guild + global registration with a fresh `Command`/`Group` per registration (a command has one parent) and
     `allowed_contexts`.
   - `key=value` argument autocomplete with alias, prefix and Levenshtein matching.
