@@ -42,14 +42,14 @@ def fake_interaction(*, done: bool = False, channel: object = None, message_id: 
     interaction.channel = channel
     interaction.message = SimpleNamespace(id=message_id) if message_id is not None else None
     interaction.followup.id = 77
-    interaction.followup.send = AsyncMock(return_value=SimpleNamespace(id=500))
+    interaction.followup.send = AsyncMock(return_value=SimpleNamespace(id=500, delete=AsyncMock()))
     interaction.followup.edit_message = AsyncMock()
     return interaction
 
 
 def handles_with(edit: AsyncMock) -> MessageHandles:
     handles = MessageHandles()
-    handles.by_id[ROLL_MESSAGE] = SimpleNamespace(id=ROLL_MESSAGE, edit=edit)  # type: ignore[assignment]
+    handles.remember_message(SimpleNamespace(id=ROLL_MESSAGE, edit=edit))  # type: ignore[arg-type]
     return handles
 
 
@@ -137,6 +137,28 @@ async def test_followup_remembers_the_message_it_was_opened_from(webhook_handles
     assert handle is not None
     assert (handle.message_id, handle.webhook_id, handle.original_target) == (500, 77, ROLL_MESSAGE)
     assert handle.expires_at - epoch_seconds() in range(FOLLOWUP_LIFETIME_SECONDS - 1, FOLLOWUP_LIFETIME_SECONDS + 1)
+
+
+async def test_followup_is_deleted_before_its_token_expires(webhook_handles: WebhookHandles):
+    message = await send_ephemeral_followup(fake_interaction(), webhook_handles, view="menu")
+
+    message.delete.assert_awaited_once_with(delay=FOLLOWUP_LIFETIME_SECONDS)
+
+
+def test_message_handle_expires_with_its_token():
+    handles = MessageHandles(lifetime_seconds=0)
+    handles.remember_message(SimpleNamespace(id=ROLL_MESSAGE))  # type: ignore[arg-type]
+
+    assert handles.get(ROLL_MESSAGE) is None
+
+
+def test_remembering_forgets_expired_handles():
+    handles = MessageHandles(lifetime_seconds=0)
+    handles.remember_message(SimpleNamespace(id=ROLL_MESSAGE))  # type: ignore[arg-type]
+    handles.lifetime_seconds = 60
+    handles.remember_message(SimpleNamespace(id=500))  # type: ignore[arg-type]
+
+    assert list(handles.by_id) == [500]
 
 
 def test_expired_webhook_handle_reads_as_missing(webhook_handles: WebhookHandles):

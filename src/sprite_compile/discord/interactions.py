@@ -9,6 +9,7 @@ channel (group DMs, DMs with other users); the partial message only works in cha
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeGuard, runtime_checkable
 
@@ -19,7 +20,8 @@ from ..storage import DatabaseHandle, ExpiringTable, epoch_seconds
 
 log = logging.getLogger(__name__)
 
-# A followup can only be edited through its interaction's webhook, whose token lasts 15 minutes; 10 s of margin.
+# An interaction's webhook token lasts 15 minutes; its responses and followups can only be edited (or deleted) through
+# it. 10 s of margin.
 FOLLOWUP_LIFETIME_SECONDS = 15 * 60 - 10
 
 
@@ -33,12 +35,15 @@ class WebhookHandle:
 
 
 class MessageHandles:
-    """The message objects of the bot's interaction responses and followups, by message ID, for this process's lifetime.
-    They edit through their interaction's webhook, which also works where the bot can't see the channel. They can't be
-    stored: after a restart, edits fall back to partial messages."""
+    """The message objects of the bot's interaction responses and followups, by message ID, until their interaction's
+    webhook token expires. They edit through that webhook, which also works where the bot can't see the channel. An
+    expired token can't edit (Discord answers 401 Invalid Webhook Token), so they're neither stored nor kept longer;
+    after that, edits fall back to partial messages."""
 
-    def __init__(self) -> None:
-        self.by_id: dict[int, discord.InteractionMessage | discord.WebhookMessage] = {}
+    def __init__(self, lifetime_seconds: float = FOLLOWUP_LIFETIME_SECONDS) -> None:
+        self.lifetime_seconds = lifetime_seconds
+        # (monotonic expiry, message), in expiry order: remembering a message again moves it to the end
+        self.by_id: dict[int, tuple[float, discord.InteractionMessage | discord.WebhookMessage]] = {}
 
     def remember(self, response: discord.InteractionCallbackResponse) -> None:
         if isinstance(response.resource, discord.InteractionMessage):
@@ -46,11 +51,24 @@ class MessageHandles:
 
     def remember_message(self, message: discord.InteractionMessage | discord.WebhookMessage) -> None:
         """E.g. a followup the bot sent, or a component interaction's `original_response()`: the message the component
-        is on."""
-        self.by_id[message.id] = message
+        is on, through the new interaction's token."""
+        self.forget_expired()
+        self.by_id.pop(message.id, None)
+        self.by_id[message.id] = (time.monotonic() + self.lifetime_seconds, message)
 
     def get(self, message_id: int) -> discord.InteractionMessage | discord.WebhookMessage | None:
-        return self.by_id.get(message_id)
+        entry = self.by_id.get(message_id)
+        if entry is None or entry[0] <= time.monotonic():
+            return None
+        return entry[1]
+
+    def forget_expired(self) -> None:
+        now = time.monotonic()
+        while self.by_id:
+            message_id, (expires_at, _) = next(iter(self.by_id.items()))
+            if expires_at > now:
+                return
+            del self.by_id[message_id]
 
 
 class WebhookHandles:
@@ -131,7 +149,8 @@ async def edit_message(
 async def send_ephemeral_followup(
     interaction: discord.Interaction, webhook_handles: WebhookHandles, **send_args: Any
 ) -> discord.WebhookMessage:
-    """Send an ephemeral followup (e.g. a menu) and remember which message it was opened from."""
+    """Send an ephemeral followup (e.g. a menu) and remember which message it was opened from. It's deleted when its
+    webhook token is about to expire, since after that its components can no longer edit anything."""
     original_target = interaction.message.id if interaction.message else None
     message = await interaction.followup.send(wait=True, ephemeral=True, **send_args)
     handle = WebhookHandle(
@@ -141,6 +160,7 @@ async def send_ephemeral_followup(
         original_target=original_target,
     )
     webhook_handles.remember(handle)
+    await message.delete(delay=FOLLOWUP_LIFETIME_SECONDS)
     return message
 
 
