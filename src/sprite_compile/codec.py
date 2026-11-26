@@ -65,9 +65,33 @@ def encode_key(key: Any) -> Any:
     return key.name if isinstance(key, Enum) else key
 
 
+# Dataclasses sprite-compile itself stores (e.g. the Discord frontend's webhook handles), by tag. Every codec knows
+# them, so bots don't register them; a bot class under one of these tags is rejected.
+LIBRARY_TYPES: dict[str, type] = {}
+
+
+def library_type(tag: str) -> Callable[[type], type]:
+    """Register one of sprite-compile's own dataclasses with every codec, under `tag`."""
+
+    def decorator(cls: type) -> type:
+        check_no_tag_field(cls)
+        LIBRARY_TYPES[tag] = cls
+        setattr(cls, "__tag__", tag)
+        return cls
+
+    return decorator
+
+
+def library_tag_clash(tag: str, cls: type) -> str | None:
+    library_class = LIBRARY_TYPES.get(tag)
+    if library_class is None or library_class is cls:
+        return None
+    return f"{cls.__qualname__}: the tag {tag!r} belongs to sprite-compile's {library_class.__qualname__}"
+
+
 class MessageCodec:
     def __init__(self) -> None:
-        self.registry: dict[str, type] = {}
+        self.registry: dict[str, type] = {}  # the bot's own classes; LIBRARY_TYPES are known too
         self._hint_cache: dict[type, dict[str, Any]] = {}
 
     def build_registry(self, packages: list[ModuleType]) -> None:
@@ -88,12 +112,17 @@ class MessageCodec:
                         self.registry[own_tag(obj)] = obj
         self.check_hints()
 
+    def add(self, tag: str, cls: type) -> None:
+        check_no_tag_field(cls)
+        if clash := library_tag_clash(tag, cls):
+            raise TypeError(clash)
+        self.registry[tag] = cls
+
     def register(self, tag: str) -> Callable[[type], type]:
         """Register a class under `tag` and encode it with that tag."""
 
         def decorator(cls: type) -> type:
-            check_no_tag_field(cls)
-            self.registry[tag] = cls
+            self.add(tag, cls)
             setattr(cls, "__tag__", tag)
             return cls
 
@@ -103,19 +132,22 @@ class MessageCodec:
         """Also decode `tag` as this class, e.g. a renamed class's old name."""
 
         def decorator(cls: type) -> type:
-            check_no_tag_field(cls)
-            self.registry[tag] = cls
+            self.add(tag, cls)
             return cls
 
         return decorator
 
+    def lookup(self, tag: str) -> type | None:
+        return LIBRARY_TYPES.get(tag) or self.registry.get(tag)
+
     def is_registered(self, cls: type) -> bool:
-        return self.registry.get(own_tag(cls)) is cls
+        return self.lookup(own_tag(cls)) is cls
 
     def check_hints(self) -> None:
-        """Raise listing every field of every registered dataclass whose type the codec can't round-trip."""
-        problems = []
-        for cls in dict.fromkeys(self.registry.values()):
+        """Raise listing every field of every registered dataclass whose type the codec can't round-trip, and every
+        class registered under one of sprite-compile's own tags."""
+        problems = [clash for tag, cls in self.registry.items() if (clash := library_tag_clash(tag, cls))]
+        for cls in dict.fromkeys([*LIBRARY_TYPES.values(), *self.registry.values()]):
             type_hints = self._type_hints(cls)
             for f in fields(cls):
                 where = f"{cls.__qualname__}.{f.name}"
@@ -123,7 +155,7 @@ class MessageCodec:
                     problems.append(f"{where}: named {TAG_KEY!r}, which the codec uses for its tag")
                 problems.extend(f"{where}: {p}" for p in self._hint_problems(type_hints.get(f.name, Any)))
         if problems:
-            raise TypeError("The codec can't round-trip these fields:\n  " + "\n  ".join(problems))
+            raise TypeError("The codec can't round-trip these classes or fields:\n  " + "\n  ".join(problems))
 
     def decode_with_hint(self, value: Any, hint: Any) -> Any:
         # If it's a tagged dict, dispatch regardless of hint
@@ -202,7 +234,7 @@ class MessageCodec:
         if not isinstance(tag, str):
             raise ValueError(f"{TAG_KEY} must be a string")
 
-        cls = self.registry.get(tag)
+        cls = self.lookup(tag)
         if cls is None:
             raise ValueError(f"Unknown type tag: {tag}")
 

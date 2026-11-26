@@ -13,7 +13,7 @@ import codec_fixtures_tag_clash
 import msgspec
 import pytest
 
-from sprite_compile.codec import MessageCodec
+from sprite_compile.codec import LIBRARY_TYPES, MessageCodec, library_type
 
 
 @dataclass(frozen=True)
@@ -298,3 +298,28 @@ def test_check_hints_lists_every_problem():
         "Unencodable.thing",
         "Unencodable.nested",
     ]
+
+
+@pytest.fixture
+def library_die(monkeypatch: pytest.MonkeyPatch) -> type:
+    """A sprite-compile dataclass, registered with every codec for this test only."""
+    monkeypatch.setitem(LIBRARY_TYPES, "LibraryDie", None)
+
+    @library_type("LibraryDie")
+    @dataclass(frozen=True)
+    class LibraryDie:
+        sides: int
+
+    return LibraryDie
+
+
+def test_library_types_round_trip_through_any_codec(library_die: type):
+    codec = MessageCodec()
+
+    encoded = codec.dict_from_dataclass([library_die(20)])
+    assert codec.decode_with_hint(encoded, list[library_die]) == [library_die(20)]
+
+
+def test_bot_class_under_a_library_tag_is_rejected(library_die: type):
+    with pytest.raises(TypeError, match="the tag 'LibraryDie' belongs to sprite-compile's"):
+        MessageCodec().register("LibraryDie")(Die)

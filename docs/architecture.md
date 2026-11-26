@@ -41,7 +41,9 @@ several frontends sharing one database. `discord.py` becomes an optional extra o
 - Codec (`sprite_compile.codec`): registered dataclasses ↔ tagged plain data for msgpack; enums by member name;
   msgspec-native values (datetime, timedelta, UUID, sets, …) rebuilt from field type hints. Bots build the registry
   with `build_registry(packages)`, which runs `check_hints()` and fails on field types the codec can't round-trip; a
-  bot's test suite should build its full registry once.
+  bot's test suite should build its full registry once. Dataclasses sprite-compile stores itself (e.g.
+  `WebhookHandle`) are registered with every codec via `@library_type(tag)`; a bot class under one of their tags is
+  rejected.
 - `config sync` / `config check` and `secrets list` as subcommands of each bot's own command (`run()` dispatches
   them; see below).
 - UX primitives (penciled in, components v2: `LayoutView`, `Container`, `ui.Label`):
