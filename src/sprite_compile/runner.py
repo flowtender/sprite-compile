@@ -23,6 +23,7 @@ import asyncio
 import importlib.metadata
 import logging
 import os
+import signal
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -90,13 +91,36 @@ async def keep_serving(frontend: Frontend) -> None:
 async def start[C: ConfigSection](
     make_frontends: Callable[[C, dict[str, str]], Sequence[Frontend]], config: C, secrets: dict[str, str]
 ) -> None:
+    """Prepare and serve every frontend until they stop or SIGTERM/SIGINT arrives, which cancels them so their `serve()`
+    cleanup runs. Handled explicitly because a container's PID 1 ignores signals it has no handler for."""
     frontends = make_frontends(config, secrets)
     if not frontends:
         raise ValueError("make_frontends returned no frontends")
-    for frontend in frontends:
-        await frontend.prepare()
-    notify_ready()
-    await asyncio.gather(*(keep_serving(frontend) for frontend in frontends))
+
+    main_task = asyncio.current_task()
+    loop = asyncio.get_running_loop()
+    stop_requested = False
+
+    def request_stop(received: signal.Signals) -> None:
+        nonlocal stop_requested
+        stop_requested = True
+        log.info("Received %s; stopping", received.name)
+        main_task.cancel()
+
+    stop_signals = (signal.SIGTERM, signal.SIGINT)
+    for stop_signal in stop_signals:
+        loop.add_signal_handler(stop_signal, request_stop, stop_signal)
+    try:
+        for frontend in frontends:
+            await frontend.prepare()
+        notify_ready()
+        await asyncio.gather(*(keep_serving(frontend) for frontend in frontends))
+    except asyncio.CancelledError:
+        if not stop_requested:
+            raise
+    finally:
+        for stop_signal in stop_signals:
+            loop.remove_signal_handler(stop_signal)
 
 
 def run[C: ConfigSection](

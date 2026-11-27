@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import os
+import signal
 import socket
 import uuid
 from collections.abc import Iterator
@@ -71,6 +74,18 @@ class BrokenFrontend(FakeFrontend):
         raise RuntimeError("Duplicate command")
 
 
+class StoppedBySignalFrontend(FakeFrontend):
+    """Serves until the process is sent SIGTERM, then records its cleanup."""
+
+    async def serve(self) -> None:
+        self.events.append("serve")
+        try:
+            os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.Event().wait()
+        finally:
+            self.events.append("cleanup")
+
+
 @pytest.fixture
 def instance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("SPRITE_CONFIG", str(tmp_path / "config.toml"))
@@ -118,6 +133,14 @@ def run_with(frontends: list[FakeFrontend], seen: dict | None = None) -> int:
         return frontends
 
     return run("sprite-compile", BotConfig, SECRETS, make_frontends, argv=[])
+
+
+def test_sigterm_stops_every_frontend_after_its_cleanup_and_exits_cleanly(instance: Path, notifications, clock):
+    stopped = StoppedBySignalFrontend(notifications, clock)
+    idle = FakeFrontend(notifications, clock)
+
+    assert run_with([stopped, idle]) == 0
+    assert stopped.events == ["prepare", "serve", "cleanup"]
 
 
 def test_prepares_every_frontend_before_ready_and_serves_after(instance: Path, notifications, clock):
