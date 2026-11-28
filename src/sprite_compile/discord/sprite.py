@@ -105,6 +105,7 @@ class DiscordSprite(commands.Bot):
         """Log in and stay connected. Closes the client when it fails, and reopens it for the next attempt."""
         if self.is_closed():
             self.clear()
+            self.http.connector = discord.utils.MISSING  # clear() keeps the connector the closed session took down with it
         try:
             await self.start(self.token)
         finally:

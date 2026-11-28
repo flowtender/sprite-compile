@@ -116,6 +116,22 @@ async def test_serve_reopens_the_client_for_the_next_attempt():
     assert bot.is_closed()
 
 
+async def test_serve_connects_through_a_fresh_connector_after_a_failed_attempt():
+    bot = make_bot()
+    connector_closed_at_request = []
+
+    async def request(route: object, **kwargs: object) -> None:
+        connector_closed_at_request.append(bot.http.connector.closed)
+        raise OSError("name resolution failed")
+
+    bot.http.request = request
+
+    for _ in range(2):
+        with pytest.raises(OSError):
+            await bot.serve()
+    assert connector_closed_at_request == [False, False]
+
+
 async def test_guild_only_removes_previous_global_commands():
     bot = make_bot(guild_id=GUILD_ID, global_commands=False)
     await start(bot)
