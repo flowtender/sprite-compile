@@ -1,7 +1,7 @@
 # Sprite architecture
 
-A shared core for discord.py bots ("sprites"), plus how they are packaged and deployed. Status: the library, the base
-image and the Discord frontend exist; the dev template and sprite-register do not yet. Planned parts are marked.
+A shared core for discord.py bots ("sprites"), plus how they are packaged and deployed. Parts not yet built are
+marked planned.
 
 ## Repositories
 
@@ -10,8 +10,8 @@ image and the Discord frontend exist; the dev template and sprite-register do no
 | sprite-compile | core library (Python package), base image; dev template (Copier, planned) |
 | sprite-register | planned: instance template (Copier), deploy and secrets tooling |
 
-Each bot lives in its own repo, so it can stay on an older sprite-compile version without being touched. The cost is
-cross-repo development; local work uses an editable install of sprite-compile.
+Each bot lives in its own repo; local work uses an editable install of sprite-compile. Decisions and their rationale
+are in [adr/](adr/README.md).
 
 Naming follows Shadowrun's resonance skills: a technomancer *compiles* a sprite (creates it) and *registers* it (binds
 it for long-term service).
@@ -58,9 +58,8 @@ several frontends sharing one database. `discord.py` becomes an optional extra o
   - Notes kept across re-renders (planned): a `TextDisplay` with a fixed `id`, read back via `walk_children()`.
   - Progress messages (planned) with rate-limited edits and a progress-callback shape.
   - Editing a message the bot sent earlier (done): through an interaction token stored per message in the cache
-    database (`MessageHandles`; a token edits for 15 minutes after its interaction, also across a restart and where
-    the bot can't see the channel), falling back to `get_partial_message` with the bot token. Tested 2026-11-20: an
-    expired token can't edit (401, error 50027).
+    database (`MessageHandles`; also across a restart and where the bot can't see the channel), falling back to
+    `get_partial_message` with the bot token once the token has expired.
   - Interaction helpers (done): defer-if-needed, ephemeral followup menus that delete themselves before their token
     expires and are rebuilt at the next start if a restart interrupts them (`MessageHandles.restore_menus` with the
     bot's builder, from the stored `MenuOrigin`: the message it was opened from and who opened it), menu updates.
@@ -87,18 +86,18 @@ python:3.14-slim
    ├─ bot-a                bot code + its own deps
    └─ bot-b
 ```
-Bots on the same base tag share its layers on disk. A bot left on an older tag keeps working (old tags stay in the
-registry) at the price of storing that base separately. Bot Containerfiles install their deps constrained to the
-versions already in the base, never upgrading them (`-c /opt/venv/constraints.txt`, exported from `uv.lock`).
+Bots on the same base tag share its layers on disk. Old tags stay in the registry, so a bot can stay on one. Bot
+Containerfiles install their deps constrained to the versions already in the base, never upgrading them
+(`-c /opt/venv/constraints.txt`, exported from `uv.lock`).
 
 The base installs sprite-compile and its locked deps into `/opt/venv` (on `PATH`) and runs as user `sprite` (UID
 1000). Mount points: the data dir at `/data` (`SPRITE_DATA_DIR`), the config at `/config/config.toml`
 (`SPRITE_CONFIG`; its own directory so sync can replace the file), secrets at `/run/secrets` (`SPRITE_SECRETS_DIR`).
 Build: `podman build -t localhost/sprite-compile:0.1 .` in the repo root.
 
-uv is not in the base. Bot Containerfiles bind-mount it for their install step only, so it never lands in a layer,
-and install as root (the venv is root's; the bot runs as `sprite`). `--no-sources` makes the bot use the base's
-sprite-compile instead of the path source its `pyproject.toml` has for development:
+uv is not in the base. Bot Containerfiles bind-mount it for their install step only and install as root (the venv is
+root's; the bot runs as `sprite`). `--no-sources` makes the bot use the base's sprite-compile instead of the path
+source its `pyproject.toml` has for development:
 ```dockerfile
 USER root
 RUN --mount=from=ghcr.io/astral-sh/uv:<version>,source=/uv,target=/bin/uv \
@@ -156,16 +155,14 @@ setup.
   to fix it (`sprite-register secrets <instance>`; the quadlet passes the instance name as `SPRITE_INSTANCE`). `<bot>
   secrets list` shows each declared secret as set / missing / not set (optional), never the values, and exits 1 when
   a required one is missing.
-- Podman's default driver stores secrets unencrypted, root-only, under `/var/lib/containers`. Later option: sops + age
-  encrypted in git (fits NixOS via sops-nix), feeding the same Podman secrets.
+- Podman's default driver stores secrets unencrypted, root-only, under `/var/lib/containers`.
 
 ## Runtime and isolation
 
 Rootful Podman, managed with sudo, with per-container hardening in each quadlet:
 
 - `UserNS=auto`: each container gets its own unprivileged UID range matching no real account. An escape lands as a
-  nobody with no home and no sudo, and containers can't read each other's files. (Rootless Podman under an admin
-  account was rejected: an escape would land as a sudoer.)
+  nobody with no home and no sudo, and containers can't read each other's files.
 - `ReadOnly=true`, `DropCapability=all`, `NoNewPrivileges=true`; only the instance's data dir is writable.
 - One image store (`/var/lib/containers`), so base layers are stored once per host.
 - Logs go to journald.
@@ -188,17 +185,23 @@ in one directory:
 
 `copier update` refreshes the quadlet when the template's hardening improves. Any bot can have several instances.
 
-Quadlet picks the units up through one directory symlink, `/etc/containers/systemd/sprites -> /srv/sprites`
-(podman-systemd.unit(5), "Using symbolic links"; recursion into a symlinked subdirectory needs Podman ≥ 5.3.0, #23755).
+Quadlet picks the units up through one directory symlink, `/etc/containers/systemd/sprites -> /srv/sprites`.
 Rules that follow from it:
-- Absolute paths in `Volume=`, `EnvironmentFile=` etc. Relative paths resolve against the unit's path as quadlet sees
-  it, which differs between file and directory symlinks.
-- `/srv` must be on the root filesystem (`findmnt /srv` prints nothing): systemd generators run before other
-  filesystems are mounted (#25215).
-- No drop-ins: the template owns the whole unit file. (Drop-ins next to a symlinked unit's target are only found since
-  PR #29825, merged 2026-09.)
+- Absolute paths in `Volume=`, `EnvironmentFile=` etc.
+- `/srv` is on the root filesystem (`findmnt /srv` prints nothing).
+- No drop-ins: the template owns the whole unit file.
+- No `podman quadlet install`.
 - Check what the generator sees with `/usr/lib/podman/quadlet --dryrun`.
-- Not `podman quadlet install` (5.6+): it copies the file, so `/srv` would stop being the single source of truth.
+
+### Network
+
+- All instances join one Podman network, `sprites` (`host/sprites.network` in sprite-register, installed once per
+  host by host setup): DNS on, bridge `sprites0`, subnet `10.89.0.0/24`. Every instance quadlet sets `Network=`.
+- Host check refuses the subnet when it overlaps a route the host already has (LAN, VPC, Docker).
+- On hosts running Docker, host setup installs `sprites-docker-forward.service`, a oneshot unit (`After=`, `PartOf=`
+  and `WantedBy=docker.service`) whose `ExecStart` inserts two `DOCKER-USER` rules accepting traffic from `sprites0`
+  and established traffic back to it (checked with `iptables -C` first), and whose `ExecStop` deletes them. Host check
+  verifies the rules with `iptables -C`; teardown disables the unit.
 
 ## Build and deploy
 
@@ -216,24 +219,15 @@ flowchart LR
 - Instances update through Podman's own `podman-auto-update` (`AutoUpdate=registry` and a fully qualified `Image=`).
   The stock rootful timer runs daily with up to 15 min random delay; override `OnCalendar=` for more often. Rollback is
   on by default: if restarting the unit doesn't succeed, the previous image is retagged and restarted.
-- What counts as "started" decides what gets rolled back. Podman has no other signal: auto-update rolls back exactly
-  when restarting the unit fails. Quadlets use `Notify=true` (`--sdnotify=container`), and `run()` writes `READY=1`
-  to `$NOTIFY_SOCKET` once the config validated, the secrets loaded, the bot was built and its extensions loaded,
-  before connecting to Discord. An image that crashes on startup, fails validation, lacks a required secret or has a
-  broken extension fails the start (at the latest at `TimeoutStartSec`) and is rolled back. With the default
-  (`conmon` notify) the unit counts as started as soon as the container runs, so none of that would roll back.
-- Failures after READY are treated as transient, not as a bad release: the platform being slow or down, an expired
-  token, rate limits. `run()` retries the failed frontend in-process with a growing delay while the bot's other
-  frontends keep running; gateway drops never even reach it, since discord.py reconnects by itself. systemd's
-  restart, with its own growing delay (`Restart=on-failure`, `RestartSec=`, `RestartSteps=`, `RestartMaxDelaySec=`;
-  systemd ≥ 254), only covers crashes outside the frontends, so it doesn't hit the start limit and stay failed.
-- The config sync/check `ExecStartPre=` runs the new image, so a release whose config fails validation fails the
-  start and rolls back too [inferred from systemd semantics; verify].
-- Not covered: a release bug that only shows after READY (e.g. a command payload Discord rejects). Its frontend keeps
-  retrying with the delay and is fixed by pushing a new release.
+- Quadlets use `Notify=true` (`--sdnotify=container`). `run()` writes `READY=1` to `$NOTIFY_SOCKET` once the config
+  validated, the secrets loaded, the bot was built and its extensions loaded, before connecting to Discord. A start
+  that fails (at the latest at `TimeoutStartSec`) is rolled back; the config sync/check `ExecStartPre=` runs the new
+  image, so it is covered too.
+- After READY, `run()` retries a failed frontend in-process with a growing delay while the bot's other frontends keep
+  running. systemd restarts (`Restart=on-failure`, `RestartSec=`, `RestartSteps=`, `RestartMaxDelaySec=`; systemd
+  ≥ 254) only cover crashes outside the frontends.
 - Private images: root's registry login, `sudo podman login <registry>`, ends up in `/run/containers/0/auth.json`,
   which is cleared on reboot. Point auto-update at a persistent file instead (`io.containers.autoupdate.authfile` label
   or `REGISTRY_AUTH_FILE`).
-- `Notify=healthy` (5.0+) with a `HealthCmd` is the alternative if the app can't send READY; not needed here.
 - CI does not update instances directly. Optional: a per-host SSH key restricted in `authorized_keys` to
   `systemctl start podman-auto-update.service`, for updates seconds after a push.
